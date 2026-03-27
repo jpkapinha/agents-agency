@@ -385,6 +385,11 @@ async function runPMAsync(
       return;
     }
 
+    // PM has reasoning text alongside tool calls — share it as a thought
+    if (assistantMsg.content?.trim()) {
+      await notifyUser(`💭 ${assistantMsg.content.trim()}`);
+    }
+
     if (signal.aborted) return;
 
     // Execute PM tool calls in parallel
@@ -447,6 +452,10 @@ async function dispatchPMTool(
     case 'consult_agent': {
       const role = args['role'] as string;
       const task = args['task'] as string;
+      const agentDef = AGENTS.find(a => a.role === role);
+      const agentName = agentDef?.name ?? role;
+      const taskPreview = task.length > 120 ? task.slice(0, 120) + '…' : task;
+      await notifyUser(`🔧 **${agentName}** — ${taskPreview}`);
       const result = await runAgent(
         role,
         task,
@@ -456,20 +465,25 @@ async function dispatchPMTool(
         (msg) => notifyUser(`⚙️ ${msg}`),
       );
       if (result.status === 'blocked') {
+        await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`);
         return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
       }
+      await notifyUser(`✅ **${agentName}** — done`);
       return result.output;
     }
 
     case 'hire_specialist': {
+      const roleDesc = args['role_description'] as string;
+      await notifyUser(`🔍 Hiring **${roleDesc}**…`);
       const { agentName, reply } = await runExternalAgent(
-        args['role_description'] as string,
+        roleDesc,
         args['task'] as string,
         `Project: ${PROJECT_NAME}`,
         externalAgents,
         modelMap,
         OPENROUTER_API_KEY,
       );
+      await notifyUser(`✅ **${agentName}** — done`);
       return `[${agentName}]: ${reply}`;
     }
 
