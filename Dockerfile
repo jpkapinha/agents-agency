@@ -37,8 +37,12 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
 # ---------------------------------------------------------------------------
 # Create non-root agency user
 # ---------------------------------------------------------------------------
-RUN groupadd --gid 1001 agency \
-    && useradd --uid 1001 --gid agency --shell /bin/bash --create-home agency
+# FIX: Also add agency user to the docker group (gid 999) so it can access
+#      the Docker socket when running without cap_drop:ALL
+RUN groupadd --gid 999 docker 2>/dev/null || true \
+    && groupadd --gid 1001 agency \
+    && useradd --uid 1001 --gid agency --shell /bin/bash --create-home agency \
+    && usermod -aG docker agency
 
 WORKDIR /app
 
@@ -53,6 +57,10 @@ RUN curl -L https://foundry.paradigm.xyz | bash \
 # ---------------------------------------------------------------------------
 # Install Hardhat and global Node tooling
 # ---------------------------------------------------------------------------
+# FIX: Set npm prefix so global installs succeed as non-root user
+#      (without this, npm install -g fails with EACCES on /usr/local/lib)
+ENV NPM_CONFIG_PREFIX=/home/agency/.npm-global
+ENV PATH="/home/agency/.npm-global/bin:${PATH}"
 RUN npm install -g \
     hardhat \
     @nomicfoundation/hardhat-toolbox \
@@ -61,17 +69,10 @@ RUN npm install -g \
     && npm cache clean --force
 
 # ---------------------------------------------------------------------------
-# Clone NanoClaw at pinned version
-# ---------------------------------------------------------------------------
-USER root
-RUN NANOCLAW_REF=$(jq -r '.nanoclaw | split("@")[1]' /dev/stdin <<< '{"nanoclaw":"qwibitai/nanoclaw@v1.2.34"}') \
-    && git clone --depth 1 --branch "${NANOCLAW_REF}" \
-       https://github.com/qwibitai/nanoclaw.git /app/nanoclaw \
-    && chown -R agency:agency /app/nanoclaw
-
-# ---------------------------------------------------------------------------
 # Copy repo assets
 # ---------------------------------------------------------------------------
+# FIX: Copy versions.lock BEFORE cloning NanoClaw so the jq read in the
+#      clone step finds the file (original had clone before copy)
 COPY --chown=agency:agency versions.lock /app/versions.lock
 COPY --chown=agency:agency config/ /app/config/
 COPY --chown=agency:agency setup/ /app/setup/
@@ -81,11 +82,39 @@ COPY --chown=agency:agency skills/ /app/skills/
 RUN chmod +x /app/setup/*.sh
 
 # ---------------------------------------------------------------------------
-# Workspace volume mount point
+# Clone & build NanoClaw (after versions.lock is available)
 # ---------------------------------------------------------------------------
-RUN mkdir -p /workspace && chown agency:agency /workspace
+# FIX: Switch to root for clone — /app is root-owned and agency lacks write
+#      permission; original used <<< here-string (bash-only, not POSIX sh)
+#      and hard-coded the version instead of reading versions.lock
+USER root
+RUN NANOCLAW_REF=$(jq -r '.nanoclaw | split("@")[1]' /app/versions.lock) \
+    && git clone --depth 1 --branch "${NANOCLAW_REF}" \
+       https://github.com/qwibitai/nanoclaw.git /app/nanoclaw
 
-USER agency
+# Pull in Discord channel from skill/discord branch
+RUN curl -fsSL https://raw.githubusercontent.com/qwibitai/nanoclaw/skill/discord/src/channels/discord.ts \
+       -o /app/nanoclaw/src/channels/discord.ts \
+    && curl -fsSL https://raw.githubusercontent.com/qwibitai/nanoclaw/skill/discord/src/channels/index.ts \
+       -o /app/nanoclaw/src/channels/index.ts
+
+# FIX: Use plain `npm install` — original used --ignore-scripts which skips
+#      the node-gyp build step, causing better-sqlite3 to fail at runtime
+# FIX: Also install discord.js (required by skills/bot.ts)
+RUN cd /app/nanoclaw && npm install && npm install discord.js@^14.18.0
+
+# ---------------------------------------------------------------------------
+# Pre-create runtime-writable directories
+# ---------------------------------------------------------------------------
+# FIX: Do NOT chown these to agency — entrypoint runs as root (required for
+#      docker socket access with cap_drop:ALL which removes DAC_OVERRIDE)
+RUN mkdir -p /workspace /app/agency-agents /app/web3-skills \
+    /app/nanoclaw/config /app/nanoclaw/roles /app/nanoclaw/prompts \
+    /app/nanoclaw/skills /app/nanoclaw/patterns
+
+# FIX: Stay as root — docker socket is root:root 0660; cap_drop:ALL removes
+#      DAC_OVERRIDE so even root group membership is insufficient without it
+USER root
 
 VOLUME ["/workspace"]
 

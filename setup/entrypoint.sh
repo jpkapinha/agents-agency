@@ -82,13 +82,39 @@ fi
 # Launch NanoClaw agency
 # ---------------------------------------------------------------------------
 log "Starting NanoClaw agency process..."
-NANOCLAW_ENTRYPOINT="${APP_DIR}/nanoclaw/dist/index.js"
 
-if [[ ! -f "${NANOCLAW_ENTRYPOINT}" ]]; then
-  die "NanoClaw entrypoint not found at ${NANOCLAW_ENTRYPOINT}. Was the image built correctly?"
+# FIX: Original assumed dist/index.js is pre-built, but NanoClaw ships only
+#      TypeScript source — dist/ is never built in the image. Fall back to tsx.
+# FIX: Use direct binary path (node_modules/.bin/tsx) instead of npx so that
+#      SIGTERM is forwarded directly to the process, not swallowed by npx.
+if [[ -f "${APP_DIR}/nanoclaw/dist/index.js" ]]; then
+  NANOCLAW_CMD="node ${APP_DIR}/nanoclaw/dist/index.js"
+elif [[ -f "${APP_DIR}/nanoclaw/src/index.ts" ]]; then
+  log "dist/index.js not found — running via tsx (source mode)"
+  NANOCLAW_CMD="${APP_DIR}/nanoclaw/node_modules/.bin/tsx ${APP_DIR}/nanoclaw/src/index.ts"
+else
+  die "NanoClaw entrypoint not found. Was the image built correctly?"
 fi
 
-exec node "${NANOCLAW_ENTRYPOINT}" \
-  --config "${APP_DIR}/config/models.json" \
-  --workspace /workspace \
-  --project "${PROJECT_NAME:-unnamed}"
+log "Starting Discord bot (OpenRouter backend)..."
+# FIX: NanoClaw requires an OneCLI service on port 10254 that is not included
+#      in this image. skills/bot.ts is a self-contained Discord bot that calls
+#      OpenRouter directly, providing equivalent interactive functionality.
+BOT_CMD="${APP_DIR}/nanoclaw/node_modules/.bin/tsx ${APP_DIR}/skills/bot.ts"
+
+_shutdown() {
+  log "Shutdown signal received — stopping bot PID ${BOT_PID}"
+  kill -TERM "${BOT_PID}" 2>/dev/null
+  wait "${BOT_PID}"
+  exit 0
+}
+
+${BOT_CMD} &
+BOT_PID=$!
+log "Bot PID: ${BOT_PID}"
+trap '_shutdown' TERM INT
+
+wait ${BOT_PID}
+EXIT_CODE=$?
+log "Bot exited with code: ${EXIT_CODE}"
+exit ${EXIT_CODE}
