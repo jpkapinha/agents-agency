@@ -7,8 +7,10 @@
  *
  * Agents now run agentic loops with real tools (read/write files, run commands).
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { resolve, basename } from 'path';
 import {
+  AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
@@ -23,7 +25,8 @@ import {
   runExternalAgent,
   type ExternalAgentDef,
 } from './agents.js';
-import { formatStateForPM } from './state.js';
+import { formatStateForPM, addRepo } from './state.js';
+import { runCommand } from './tools.js';
 
 const DISCORD_BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN    || '';
 const OPENROUTER_API_KEY   = process.env.OPENROUTER_API_KEY   || '';
@@ -33,6 +36,7 @@ const TRIGGER              = /^@andy\b/i;
 const MODELS_CONFIG        = '/app/config/models.json';
 const ROLES_DIR            = '/app/roles';
 const HISTORY_DIR          = '/workspace/.agency';
+const WORKSPACE            = '/workspace';
 
 if (!DISCORD_BOT_TOKEN)  { console.error('DISCORD_BOT_TOKEN is not set');  process.exit(1); }
 if (!OPENROUTER_API_KEY) { console.error('OPENROUTER_API_KEY is not set'); process.exit(1); }
@@ -87,6 +91,25 @@ async function notifyUser(msg: string): Promise<void> {
   for (const chunk of chunks) {
     await pmChannel.send(chunk).catch(err => console.error('[bot] notifyUser error:', err));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Artifact delivery — upload a file from /workspace to Discord
+// ---------------------------------------------------------------------------
+
+async function sendArtifact(filePath: string, description?: string): Promise<void> {
+  if (!pmChannel) return;
+  // Accept both relative (to /workspace) and absolute paths
+  const abs = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath);
+  if (!abs.startsWith(WORKSPACE + '/') && abs !== WORKSPACE) {
+    throw new Error(`Path outside workspace: ${filePath}`);
+  }
+  if (!existsSync(abs)) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+  const attachment = new AttachmentBuilder(abs, { name: basename(abs) });
+  await pmChannel.send({ content: description ?? '', files: [attachment] })
+    .catch(err => console.error('[bot] sendArtifact error:', err));
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +200,8 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 5. Use \`request_decision\` when: at an architectural fork where client preference matters, before committing/deploying, or when genuinely blocked. Do NOT ask for decisions you can resolve with good engineering judgment.
 6. Use \`get_state\` at the start of a new task to check what's already been done.
 7. Answer simple questions (greetings, status, clarifications) directly — no need to call agents.
+8. Use \`add_repo\` when the client provides a GitHub URL — clone it once, then agents work within /workspace/{name}.
+9. Use \`send_artifact\` to deliver documents and files: architecture docs, audit reports, specs, PDFs. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents can push code and open PRs via: run_command("gh pr create ...").
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -257,8 +282,41 @@ const GET_STATE_TOOL = {
   type: 'function',
   function: {
     name: 'get_state',
-    description: 'Get the current project state — tasks, decisions, blockers.',
+    description: 'Get the current project state — tasks, decisions, blockers, repos.',
     parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
+const SEND_ARTIFACT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'send_artifact',
+    description: 'Upload a file from /workspace to Discord so the client can download it. Use for reports (MD, PDF), diagrams, specs, or any deliverable. Agents can generate PDFs with: run_command("pandoc input.md -o output.pdf")',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to /workspace, e.g. "docs/architecture.pdf"' },
+        description: { type: 'string', description: 'Short message shown above the file in Discord' },
+      },
+      required: ['path'],
+    },
+  },
+};
+
+const ADD_REPO_TOOL = {
+  type: 'function',
+  function: {
+    name: 'add_repo',
+    description: 'Clone a GitHub repository into /workspace and register it for the project. Agents will then work within that repo. Call once per repo — subsequent tasks reference the repo by name.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'HTTPS GitHub URL, e.g. "https://github.com/org/repo"' },
+        name: { type: 'string', description: 'Local folder name in /workspace. Defaults to repo name from URL.' },
+        branch: { type: 'string', description: 'Branch to clone. Default: main' },
+      },
+      required: ['url'],
+    },
   },
 };
 
@@ -268,6 +326,8 @@ const PM_TOOLS = [
   SEND_UPDATE_TOOL,
   REQUEST_DECISION_TOOL,
   GET_STATE_TOOL,
+  SEND_ARTIFACT_TOOL,
+  ADD_REPO_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -411,6 +471,34 @@ async function dispatchPMTool(
         OPENROUTER_API_KEY,
       );
       return `[${agentName}]: ${reply}`;
+    }
+
+    case 'send_artifact': {
+      const filePath = args['path'] as string;
+      const description = args['description'] as string | undefined;
+      await sendArtifact(filePath, description);
+      return `Artifact sent: ${filePath}`;
+    }
+
+    case 'add_repo': {
+      const url = (args['url'] as string).replace(/\.git$/, '');
+      const name = (args['name'] as string | undefined)
+        ?? url.split('/').pop()
+        ?? 'repo';
+      const branch = (args['branch'] as string | undefined) ?? 'main';
+      const localPath = `/workspace/${name}`;
+
+      if (existsSync(localPath)) {
+        addRepo(url, name, branch);
+        return `Repo already exists at ${localPath} — registered in project state.`;
+      }
+
+      const result = runCommand(`git clone --depth 1 --branch "${branch}" "${url}.git" "${localPath}" 2>&1 || git clone --depth 1 "${url}.git" "${localPath}"`, 120_000);
+      if (result.exitCode !== 0) {
+        return `Clone failed:\n${result.stderr || result.stdout}`;
+      }
+      addRepo(url, name, branch);
+      return `Cloned ${url} → ${localPath} (branch: ${branch}). Agents can now work in /workspace/${name}.`;
     }
 
     default:

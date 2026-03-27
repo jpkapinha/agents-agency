@@ -39,6 +39,21 @@ done
 log "Environment validation passed."
 
 # ---------------------------------------------------------------------------
+# GitHub credentials — configure git + gh CLI if GITHUB_TOKEN is set
+# ---------------------------------------------------------------------------
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  log "Configuring GitHub credentials..."
+  # URL rewrite: all https://github.com clones/pushes use the token transparently
+  git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+  # Authenticate gh CLI (used by agents for PR creation, issue management)
+  echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null \
+    || warn "gh auth login failed — gh CLI may not work correctly."
+  log "GitHub credentials configured (git + gh CLI)."
+else
+  warn "GITHUB_TOKEN not set — private repo clones and PR creation will not work."
+fi
+
+# ---------------------------------------------------------------------------
 # Step 1: Install / update agency-agents role definitions
 # ---------------------------------------------------------------------------
 log "Step 1/3 — Installing agency-agents role definitions..."
