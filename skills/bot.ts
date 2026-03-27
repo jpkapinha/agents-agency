@@ -1,10 +1,10 @@
 /**
  * Discord bot — Project Manager with multi-agent orchestration.
  *
- * The PM (Claude Opus) receives messages from Discord and can delegate tasks
- * to specialist agents (Solidity Dev, Tech Lead, Frontend Dev, etc.) via
- * OpenRouter tool-calling. Specialists run in parallel when the PM requests
- * multiple agents. Final response is synthesised by the PM and sent to Discord.
+ * The PM (Claude Opus) receives messages from Discord and delegates tasks to:
+ *   - Core team (consult_agent): 7 fixed Web3 specialists with dedicated models
+ *   - External roster (hire_specialist): any role from msitarzewski/agency-agents,
+ *     matched by description and loaded from /app/nanoclaw/roles/ at startup
  */
 import {
   Client,
@@ -13,22 +13,32 @@ import {
   Message,
   TextChannel,
 } from '/app/nanoclaw/node_modules/discord.js/src/index.js';
-import { AGENTS, loadModelMap, runAgent } from './agents.js';
+import {
+  AGENTS,
+  loadModelMap,
+  runAgent,
+  loadExternalAgents,
+  runExternalAgent,
+  type ExternalAgentDef,
+} from './agents.js';
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const PROJECT_NAME = process.env.PROJECT_NAME || 'Web3 Project';
 const TRIGGER = /^@andy\b/i;
 const MODELS_CONFIG = '/app/config/models.json';
+const ROLES_DIR = '/app/nanoclaw/roles';
 
 if (!DISCORD_BOT_TOKEN) { console.error('DISCORD_BOT_TOKEN is not set'); process.exit(1); }
 if (!OPENROUTER_API_KEY) { console.error('OPENROUTER_API_KEY is not set'); process.exit(1); }
 
 const modelMap = loadModelMap(MODELS_CONFIG);
 const PM_MODEL = modelMap['project-manager'] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
+const externalAgents: ExternalAgentDef[] = loadExternalAgents(ROLES_DIR);
 
 console.log(`[bot] PM model: ${PM_MODEL}`);
-console.log(`[bot] Specialist models: ${AGENTS.map(a => `${a.role}=${modelMap[a.role] ?? 'default'}`).join(', ')}`);
+console.log(`[bot] Core team: ${AGENTS.map(a => a.role).join(', ')}`);
+console.log(`[bot] External roster: ${externalAgents.length} specialists available for hire`);
 
 // ---------------------------------------------------------------------------
 // PM system prompt
@@ -36,43 +46,70 @@ console.log(`[bot] Specialist models: ${AGENTS.map(a => `${a.role}=${modelMap[a.
 
 const PM_SYSTEM = `You are Andy, the Project Manager of a Web3 development agency. You are the sole point of contact with the client — all other agents work internally and only you communicate via Discord.
 
-Your specialist team:
+**Your core team** (use \`consult_agent\`):
 ${AGENTS.map(a => `- **${a.name}** (${a.role}): ${a.description}`).join('\n')}
 
+**External roster** (use \`hire_specialist\`):
+Beyond your core team, you can hire any specialist from the agency roster — including roles like UX designer, data scientist, legal advisor, marketing strategist, QA engineer, technical writer, and many others. Describe the expertise you need and the system will find the best match from ${externalAgents.length} available specialists.
+
 **How to work:**
-1. When a client sends a request, decide which specialists are needed.
-2. Delegate using the \`consult_agent\` tool — you can call multiple agents and they run in parallel.
-3. Synthesise their responses into a clear, professional reply for the client.
-4. Ask clarifying questions when the request is ambiguous before delegating.
-5. For simple questions you can answer yourself (greetings, process questions, status updates), do not call agents unnecessarily.
+1. Identify which specialists are needed for the client's request.
+2. Use \`consult_agent\` for your core Web3 team — they run in parallel.
+3. Use \`hire_specialist\` for any expertise outside your core team — describe the role you need (e.g. "UX designer", "legal advisor for token compliance", "technical writer").
+4. You can mix both tools in a single turn — they all run in parallel.
+5. Synthesise all responses into a clear, professional reply for the client.
+6. Ask clarifying questions when the request is ambiguous.
+7. Answer simple questions (greetings, process, status) directly — no need to call agents.
 
 **Communication style:** Professional but approachable. Summarise technical details — the client may not be deeply technical. Use bullet points for multi-part answers.
 
 Current project: ${PROJECT_NAME}`;
 
 // ---------------------------------------------------------------------------
-// Tool definition passed to PM
+// Tool definitions
 // ---------------------------------------------------------------------------
 
 const CONSULT_AGENT_TOOL = {
   type: 'function',
   function: {
     name: 'consult_agent',
-    description: 'Delegate a task to a specialist agent on your team. You can call this multiple times to consult different specialists — they run in parallel.',
+    description: 'Delegate a task to a core team specialist. Multiple calls run in parallel.',
     parameters: {
       type: 'object',
       properties: {
         role: {
           type: 'string',
           enum: AGENTS.map(a => a.role),
-          description: 'The specialist role to consult.',
+          description: 'The core team specialist to consult.',
         },
         task: {
           type: 'string',
-          description: 'The specific task or question for this specialist. Be precise — they only see this text plus the project context.',
+          description: 'The specific task or question. Be precise.',
         },
       },
       required: ['role', 'task'],
+    },
+  },
+};
+
+const HIRE_SPECIALIST_TOOL = {
+  type: 'function',
+  function: {
+    name: 'hire_specialist',
+    description: `Hire an external specialist from the agency roster (${externalAgents.length} available). Use this for expertise outside your core team. Describe the role you need in natural language — e.g. "UX designer", "blockchain security auditor", "technical writer for docs", "legal advisor for token compliance".`,
+    parameters: {
+      type: 'object',
+      properties: {
+        role_description: {
+          type: 'string',
+          description: 'Natural language description of the expertise needed (e.g. "UX designer", "data scientist", "community manager").',
+        },
+        task: {
+          type: 'string',
+          description: 'The specific task or question for this specialist.',
+        },
+      },
+      required: ['role_description', 'task'],
     },
   },
 };
@@ -105,14 +142,12 @@ interface ORResponse {
 // PM orchestration
 // ---------------------------------------------------------------------------
 
-// Per-channel conversation history (PM-level only)
 const histories: Record<string, ORMessage[]> = {};
 
 async function runPM(channelId: string, userMessage: string): Promise<string> {
   const history = histories[channelId] ?? [];
   history.push({ role: 'user', content: userMessage });
 
-  // Orchestration loop: keep going until PM stops calling tools
   for (let round = 0; round < 10; round++) {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -122,11 +157,8 @@ async function runPM(channelId: string, userMessage: string): Promise<string> {
       },
       body: JSON.stringify({
         model: PM_MODEL,
-        messages: [
-          { role: 'system', content: PM_SYSTEM },
-          ...history,
-        ],
-        tools: [CONSULT_AGENT_TOOL],
+        messages: [{ role: 'system', content: PM_SYSTEM }, ...history],
+        tools: [CONSULT_AGENT_TOOL, HIRE_SPECIALIST_TOOL],
         tool_choice: 'auto',
       }),
     });
@@ -139,51 +171,59 @@ async function runPM(channelId: string, userMessage: string): Promise<string> {
     const data = await response.json() as ORResponse;
     const choice = data.choices[0];
     const assistantMsg = choice.message;
-
-    // Add PM's message (with tool_calls if any) to history
     history.push(assistantMsg);
 
     if (choice.finish_reason !== 'tool_calls' || !assistantMsg.tool_calls?.length) {
-      // PM is done — return its text reply
-      histories[channelId] = history.slice(-40); // keep last 20 turns
+      histories[channelId] = history.slice(-40);
       return assistantMsg.content ?? '(no response)';
     }
 
-    // Run all tool calls in parallel
     const toolCalls = assistantMsg.tool_calls;
-    console.log(`[bot] PM delegating to: ${toolCalls.map(tc => {
-      try { return JSON.parse(tc.function.arguments).role; } catch { return tc.function.name; }
+    console.log(`[bot] PM calling: ${toolCalls.map(tc => {
+      try {
+        const a = JSON.parse(tc.function.arguments) as Record<string, string>;
+        return tc.function.name === 'hire_specialist'
+          ? `hire(${a['role_description']})`
+          : a['role'];
+      } catch { return tc.function.name; }
     }).join(', ')}`);
 
     const toolResults = await Promise.all(
       toolCalls.map(async (tc): Promise<ORMessage> => {
         let resultContent: string;
         try {
-          const args = JSON.parse(tc.function.arguments) as { role: string; task: string };
-          resultContent = await runAgent(
-            args.role,
-            args.task,
-            `Project: ${PROJECT_NAME}`,
-            modelMap,
-            OPENROUTER_API_KEY,
-          );
+          const args = JSON.parse(tc.function.arguments) as Record<string, string>;
+
+          if (tc.function.name === 'hire_specialist') {
+            const { agentName, reply } = await runExternalAgent(
+              args['role_description'] ?? '',
+              args['task'] ?? '',
+              `Project: ${PROJECT_NAME}`,
+              externalAgents,
+              modelMap,
+              OPENROUTER_API_KEY,
+            );
+            resultContent = `[${agentName}]: ${reply}`;
+          } else {
+            resultContent = await runAgent(
+              args['role'] ?? '',
+              args['task'] ?? '',
+              `Project: ${PROJECT_NAME}`,
+              modelMap,
+              OPENROUTER_API_KEY,
+            );
+          }
         } catch (err) {
-          resultContent = `Error consulting agent: ${(err as Error).message}`;
-          console.error(`[bot] Agent call failed:`, err);
+          resultContent = `Error: ${(err as Error).message}`;
+          console.error('[bot] Agent call failed:', err);
         }
-        return {
-          role: 'tool',
-          tool_call_id: tc.id,
-          content: resultContent,
-        };
+        return { role: 'tool', tool_call_id: tc.id, content: resultContent };
       }),
     );
 
-    // Add all tool results to history before next PM turn
     history.push(...toolResults);
   }
 
-  // Safety: if we somehow hit 10 rounds, return what we have
   histories[channelId] = history.slice(-40);
   return 'I consulted the team but ran into an issue synthesising the response. Please try again.';
 }
@@ -205,6 +245,7 @@ client.once(Events.ClientReady, (c) => {
   console.log(`[bot] Discord connected as ${c.user.tag}`);
   console.log(`[bot] Trigger: @Andy (or mention the bot)`);
   console.log(`[bot] PM model: ${PM_MODEL}`);
+  console.log(`[bot] External specialists available: ${externalAgents.length}`);
 });
 
 client.on(Events.MessageCreate, async (message: Message) => {
@@ -223,7 +264,6 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
   const channelId = message.channelId;
 
-  // Keep typing indicator alive (Discord drops it after 10 s)
   let typingActive = true;
   const keepTyping = async () => {
     while (typingActive) {
@@ -238,8 +278,6 @@ client.on(Events.MessageCreate, async (message: Message) => {
   try {
     const reply = await runPM(channelId, content);
     typingActive = false;
-
-    // Split long replies (Discord limit: 2000 chars)
     const chunks = reply.match(/[\s\S]{1,1900}/g) ?? [reply];
     for (const chunk of chunks) {
       await message.reply(chunk);
@@ -253,6 +291,5 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
 client.login(DISCORD_BOT_TOKEN);
 
-// Graceful shutdown
 process.on('SIGTERM', () => { console.log('[bot] Shutting down...'); client.destroy(); process.exit(0); });
 process.on('SIGINT',  () => { console.log('[bot] Shutting down...'); client.destroy(); process.exit(0); });
