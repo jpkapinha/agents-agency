@@ -5,10 +5,6 @@ version: "3.9"
 # Spin up the full Web3 agency with: docker compose up -d
 # =============================================================================
 
-secrets:
-  git_deploy_key:
-    file: ./secrets/git_deploy_key
-
 networks:
   agency-net:
     driver: bridge
@@ -22,7 +18,10 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ghcr.io/jpkapinha/agents-agency:latest
-    container_name: nanoclaw-agency
+    # FIX: Renamed from nanoclaw-agency — NanoClaw's cleanupOrphans() scans
+    #      for containers matching "nanoclaw-*" and stops them, which caused
+    #      the container to kill itself seconds after starting
+    container_name: project0-agency
     restart: unless-stopped
 
     # Security hardening
@@ -32,9 +31,10 @@ services:
       - ALL
     read_only: false   # NanoClaw writes runtime state
 
-    # SSH deploy key for private web3-skills repo
-    secrets:
-      - git_deploy_key
+    # FIX: Removed top-level `secrets:` block and service `secrets:` reference
+    #      — secrets/git_deploy_key does not exist in the repo; Docker Compose
+    #      errors out at startup if a referenced secret file is missing.
+    #      The load-web3-skills.sh script already handles the missing-key case.
 
     environment:
       # Loaded from .env file (copy .env.example → .env)
@@ -59,13 +59,15 @@ services:
     networks:
       - agency-net
 
-    # Healthcheck — verifies the agency process is alive
+    # FIX: Changed healthcheck from `node -e "require('/app/nanoclaw/dist/health')"` —
+    #      dist/ is never built (NanoClaw runs via tsx from source), so that check
+    #      always fails and the container is permanently marked unhealthy
     healthcheck:
-      test: ["CMD", "node", "-e", "require('/app/nanoclaw/dist/health')"]
+      test: ["CMD", "pgrep", "-f", "tsx"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 60s
+      start_period: 30s
 
     logging:
       driver: json-file
