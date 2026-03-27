@@ -1,11 +1,11 @@
 # =============================================================================
 # jpkapinha/agents-agency
-# Production-ready NanoClaw Web3 Agency sandbox
+# Autonomous Web3 AI Agency — Andy the PM + specialist agents
 # =============================================================================
 FROM node:22-bookworm-slim AS base
 
 LABEL org.opencontainers.image.source="https://github.com/jpkapinha/agents-agency"
-LABEL org.opencontainers.image.description="NanoClaw Web3 Agency – agents-agency edition"
+LABEL org.opencontainers.image.description="Autonomous Web3 AI Agency — Andy the PM coordinates specialist agents"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # ---------------------------------------------------------------------------
@@ -71,8 +71,6 @@ RUN npm install -g \
 # ---------------------------------------------------------------------------
 # Copy repo assets
 # ---------------------------------------------------------------------------
-# FIX: Copy versions.lock BEFORE cloning NanoClaw so the jq read in the
-#      clone step finds the file (original had clone before copy)
 COPY --chown=agency:agency versions.lock /app/versions.lock
 COPY --chown=agency:agency config/ /app/config/
 COPY --chown=agency:agency setup/ /app/setup/
@@ -82,39 +80,16 @@ COPY --chown=agency:agency skills/ /app/skills/
 RUN chmod +x /app/setup/*.sh
 
 # ---------------------------------------------------------------------------
-# Clone & build NanoClaw (after versions.lock is available)
+# Install skills dependencies (discord.js + tsx)
 # ---------------------------------------------------------------------------
-# FIX: Switch to root for clone — /app is root-owned and agency lacks write
-#      permission; original used <<< here-string (bash-only, not POSIX sh)
-#      and hard-coded the version instead of reading versions.lock
 USER root
-RUN NANOCLAW_REF=$(jq -r '.nanoclaw | split("@")[1]' /app/versions.lock) \
-    && git clone --depth 1 --branch "${NANOCLAW_REF}" \
-       https://github.com/qwibitai/nanoclaw.git /app/nanoclaw
-
-# Pull in Discord channel from skill/discord branch
-RUN curl -fsSL https://raw.githubusercontent.com/qwibitai/nanoclaw/skill/discord/src/channels/discord.ts \
-       -o /app/nanoclaw/src/channels/discord.ts \
-    && curl -fsSL https://raw.githubusercontent.com/qwibitai/nanoclaw/skill/discord/src/channels/index.ts \
-       -o /app/nanoclaw/src/channels/index.ts
-
-# FIX: Use plain `npm install` — original used --ignore-scripts which skips
-#      the node-gyp build step, causing better-sqlite3 to fail at runtime
-# FIX: Also install discord.js (required by skills/bot.ts)
-RUN cd /app/nanoclaw && npm install && npm install discord.js@^14.18.0
+RUN cd /app/skills && npm install
 
 # ---------------------------------------------------------------------------
 # Pre-create runtime-writable directories
 # ---------------------------------------------------------------------------
-# FIX: Do NOT chown these to agency — entrypoint runs as root (required for
-#      docker socket access with cap_drop:ALL which removes DAC_OVERRIDE)
 RUN mkdir -p /workspace /app/agency-agents /app/web3-skills \
-    /app/nanoclaw/config /app/nanoclaw/roles /app/nanoclaw/prompts \
-    /app/nanoclaw/skills /app/nanoclaw/patterns
-
-# FIX: Stay as root — docker socket is root:root 0660; cap_drop:ALL removes
-#      DAC_OVERRIDE so even root group membership is insufficient without it
-USER root
+    /app/roles /app/patterns
 
 VOLUME ["/workspace"]
 

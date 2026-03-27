@@ -13,7 +13,7 @@ import {
   GatewayIntentBits,
   Message,
   TextChannel,
-} from '/app/nanoclaw/node_modules/discord.js/src/index.js';
+} from 'discord.js';
 import {
   AGENTS,
   loadModelMap,
@@ -30,7 +30,7 @@ const DISCORD_PM_CHANNEL_ID = process.env.DISCORD_PM_CHANNEL_ID || '';
 const PROJECT_NAME         = process.env.PROJECT_NAME          || 'Web3 Project';
 const TRIGGER              = /^@andy\b/i;
 const MODELS_CONFIG        = '/app/config/models.json';
-const ROLES_DIR            = '/app/nanoclaw/roles';
+const ROLES_DIR            = '/app/roles';
 
 if (!DISCORD_BOT_TOKEN)  { console.error('DISCORD_BOT_TOKEN is not set');  process.exit(1); }
 if (!OPENROUTER_API_KEY) { console.error('OPENROUTER_API_KEY is not set'); process.exit(1); }
