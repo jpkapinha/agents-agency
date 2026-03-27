@@ -1,6 +1,6 @@
 # agents-agency
 
-**A fully isolated, AI-powered Web3 development agency — spun up in under 30 seconds.**
+**An autonomous AI development agency — talk to Andy the Project Manager in Discord, he handles the rest.**
 
 [![Build & Push](https://github.com/jpkapinha/agents-agency/actions/workflows/build.yml/badge.svg)](https://github.com/jpkapinha/agents-agency/actions/workflows/build.yml)
 [![GitHub Template](https://img.shields.io/badge/GitHub-Template-blue?logo=github)](https://github.com/jpkapinha/agents-agency/generate)
@@ -11,15 +11,31 @@
 
 ## What is this?
 
-This is a **GitHub Template repository** that gives any Protofire Project Manager a complete, production-ready AI development agency for Web3 projects — with a single command.
+A **GitHub Template** that gives you a complete autonomous Web3 development agency in one `docker compose up`.
 
-Every specialist agent (Product Manager, Tech Lead, Solutions Architect, Frontend Dev, Backend Dev, Solidity Dev, DevOps, Risk Manager) runs in its own **Docker MicroVM sandbox**, isolated from the host and from each other. The **Project Manager** is the only agent your team ever talks to — via Discord. Everything else happens autonomously behind the scenes.
+You talk to **Andy**, the Project Manager, via Discord. Andy understands your requirements, delegates to specialist agents, tracks progress, and delivers results — code committed to your GitHub repos, documents sent as Discord attachments, decisions escalated back to you when needed.
 
-Pre-loaded with:
-- **[agency-agents](https://github.com/msitarzewski/agency-agents)** — battle-tested role definitions for the full agency
-- **[protofire/web3-skills](https://github.com/protofire/web3-skills)** (private) — Protofire's proprietary patterns, good practices, and lessons learned from client projects
-- **Foundry** + **Hardhat** — the two dominant smart contract development frameworks
-- **Real-time cost tracking** — per-model spend logging with Discord alerts
+Everything happens autonomously in the background. Andy's team can write Solidity contracts, run Foundry tests, build React frontends, set up CI/CD, audit for security risks, and open pull requests — without you micromanaging a single step.
+
+---
+
+## How it works
+
+```
+You (Discord) ──► Andy (PM)
+                    ├── consult_agent → Solidity Dev    (writes code, runs forge test, iterates)
+                    ├── consult_agent → Tech Lead        (architecture review)
+                    ├── consult_agent → Frontend Dev     (React/Next.js components)
+                    ├── consult_agent → Backend Dev      (APIs, indexers, databases)
+                    ├── consult_agent → DevOps           (Docker, CI/CD, deployments)
+                    ├── consult_agent → Risk Manager     (security audit)
+                    ├── consult_agent → Solutions Arch   (system design)
+                    └── hire_specialist → 187 external roles (UX, legal, data science, ...)
+```
+
+Each specialist runs an **agentic loop** (up to 20 rounds): reads files, writes code, runs commands, fixes errors — until the task is done or it needs a decision from you.
+
+Andy keeps you informed with progress updates in Discord and asks for your input only when a real decision is needed (architectural forks, before deploying, when genuinely blocked).
 
 ---
 
@@ -27,14 +43,16 @@ Pre-loaded with:
 
 | Feature | Details |
 |---|---|
-| One-command startup | `docker compose up -d` — ready in <30 seconds |
-| MicroVM sandboxing | Every agent isolated; no agent can escape its container |
-| Discord-first UX | PM talks to your team; all other agents work silently |
-| Cost-optimized routing | Declarative model config — Opus for reasoning, Sonnet for coding, Grok for Solidity |
-| Private skills loading | SSH deploy key for secure `protofire/web3-skills` access |
+| Autonomous execution | Agents write code, run tests, iterate, and fix errors without hand-holding |
+| Discord interface | Talk to Andy naturally; he coordinates everything behind the scenes |
+| Persistent memory | Andy remembers past conversations across restarts |
+| Artifact delivery | Andy sends files (MD, PDF, specs, reports) as Discord attachments |
+| GitHub integration | Andy clones repos, agents push code, open PRs via `gh` |
+| Multiple repos | Track several GitHub repos per project; agents work across all of them |
+| 187 specialists | Full agency-agents roster: UX, legal, marketing, data science, and more |
 | Web3 toolchain | Foundry (forge, cast, anvil, chisel) + Hardhat pre-installed |
-| GitHub Actions CI | Auto-builds and pushes to `ghcr.io` on every push to `main` |
-| Dev Container | Open in VS Code / GitHub Codespaces with one click |
+| Cost-optimized routing | Declarative model config per role in `config/models.json` |
+| GitHub Actions CI | Auto-builds and pushes to `ghcr.io` on every push to `master` |
 
 ---
 
@@ -42,203 +60,332 @@ Pre-loaded with:
 
 ### Prerequisites
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose on Linux)
-- A [Discord bot token](https://discord.com/developers/applications) (takes ~5 minutes to set up)
-- An [OpenRouter API key](https://openrouter.ai/) for model access
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose)
+- A [Discord bot token](https://discord.com/developers/applications)
+- An [OpenRouter API key](https://openrouter.ai/)
 
-### Step 1 — Create your project repo from this template
+### 1 — Create your project repo
 
-Click **"Use this template"** on GitHub, or use the CLI:
+Click **"Use this template"** on GitHub, or:
 
 ```bash
-gh repo create my-client-project \
+gh repo create my-web3-project \
   --template jpkapinha/agents-agency \
   --private \
   --clone
-cd my-client-project
+cd my-web3-project
 ```
 
-### Step 2 — Configure your environment
+### 2 — Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and fill in:
+Edit `.env` and fill in the required values (see [Environment Variables](#environment-variables) below).
 
-```env
-OPENROUTER_API_KEY=sk-or-v1-...        # Your OpenRouter key
-DISCORD_BOT_TOKEN=...                   # Your Discord bot token
-DISCORD_GUILD_ID=...                    # Your Discord server ID
-DISCORD_PM_CHANNEL_ID=...              # Channel where PM posts updates
-PROJECT_NAME=acme-defi-protocol        # Short name for this project
-```
-
-### Step 3 — (If using private web3-skills) Add your SSH deploy key
-
-Place your read-only SSH deploy key in `secrets/git_deploy_key`:
-
-```bash
-# Paste or copy your private key into this file
-nano secrets/git_deploy_key
-chmod 600 secrets/git_deploy_key
-```
-
-> No deploy key? The agency still starts — it just won't load the private Protofire skills.
-> See [SSH Deploy Key Setup](#ssh-deploy-key-setup) below.
-
-### Step 4 — Launch the agency
+### 3 — Launch
 
 ```bash
 docker compose up -d
+docker compose logs -f
 ```
 
-That's it. Your Project Manager will post a "ready" message in your Discord channel within 30 seconds.
+Andy will connect to Discord within ~30 seconds. You'll see:
+
+```
+[bot] Discord connected as YourBot#1234
+[bot] PM channel ready: #your-channel
+```
+
+### 4 — Talk to Andy
+
+In your Discord PM channel:
+
+```
+@Andy hello, what can you do?
+@Andy add the repo https://github.com/myorg/my-contracts
+@Andy build an ERC-20 staking contract with a 30-day lockup period
+@Andy run a security audit on the staking contract and send me the report
+```
 
 ---
 
-## Model Routing
+## Environment Variables
 
-Cost is controlled declaratively in `config/models.json`. You can change models per role without touching any code.
+### Required
 
-| Role | Model | Why |
+| Variable | Description |
+|---|---|
+| `OPENROUTER_API_KEY` | Your OpenRouter key. Get one at [openrouter.ai](https://openrouter.ai) |
+| `DISCORD_BOT_TOKEN` | Your Discord bot token. See [Discord Setup](#discord-setup) |
+| `DISCORD_GUILD_ID` | Your Discord server (guild) ID |
+| `DISCORD_PM_CHANNEL_ID` | Channel ID where Andy posts updates and receives messages |
+| `PROJECT_NAME` | Short name for this project, e.g. `acme-defi-protocol` |
+
+### Optional
+
+| Variable | Default | Description |
 |---|---|---|
-| Project Manager | `claude-4.6-opus` | High-reasoning, client-facing quality |
-| Solutions Architect | `claude-4.6-opus` | Architecture decisions require deep reasoning |
-| Risk Manager | `claude-4.6-opus` | Security and risk analysis is high-stakes |
-| Product Manager | `claude-4.6-sonnet` | Strong planning at lower cost |
-| Tech Lead | `claude-4.6-sonnet` | Code review and technical coordination |
-| Frontend Dev | `claude-4.6-sonnet` | UI/UX development |
-| Backend Dev | `claude-4.6-sonnet` | API and service development |
-| DevOps | `claude-4.6-sonnet` | Infrastructure and CI/CD |
-| Solidity Dev | `grok-4.2` | Excellent on-chain reasoning and EVM expertise |
-
-All models are routed through [OpenRouter](https://openrouter.ai/) — one API key, all models.
+| `GITHUB_TOKEN` | _(none)_ | GitHub personal access token. Required for private repo clones, `git push`, and `gh pr create`. Needs `repo` + `workflow` scopes. Create at [github.com/settings/tokens](https://github.com/settings/tokens) |
+| `GITHUB_ORG` | `jpkapinha` | Your GitHub org/username, used in log messages |
+| `COST_WARNING_THRESHOLD_USD` | `5` | Discord alert when session spend exceeds this amount |
+| `WEB3_SKILLS_REPO` | _(protofire private)_ | SSH URL for a private web3-skills repo (see [Private Skills](#optional-private-web3-skills)) |
 
 ---
 
 ## Discord Setup
 
 1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) → **New Application**
-2. Under **Bot** → click **Add Bot** → copy the token → set `DISCORD_BOT_TOKEN`
-3. Under **OAuth2 → URL Generator**: select `bot` scope + `Send Messages`, `Read Message History` permissions
-4. Open the generated URL, add the bot to your server
-5. Right-click your PM channel → **Copy Channel ID** → set `DISCORD_PM_CHANNEL_ID`
-6. Right-click your server icon → **Copy Server ID** → set `DISCORD_GUILD_ID`
+2. Under **Bot** → **Add Bot** → copy the token → set `DISCORD_BOT_TOKEN`
+3. Under **Bot** → **Privileged Gateway Intents** → enable **Message Content Intent**
+4. Under **OAuth2 → URL Generator**: select scope `bot` + permissions `Send Messages`, `Read Message History`, `Attach Files`
+5. Open the generated URL and add the bot to your server
+6. Right-click your PM channel → **Copy Channel ID** → set `DISCORD_PM_CHANNEL_ID`
+7. Right-click your server icon → **Copy Server ID** → set `DISCORD_GUILD_ID`
+
+Andy responds to `@mention` or messages starting with `@andy`.
 
 ---
 
-## SSH Deploy Key Setup
+## Talking to Andy
 
-The `protofire/web3-skills` repository is private. Access it using a read-only SSH deploy key:
+### Starting a task
 
-### 1. Generate a dedicated key pair
+Andy acknowledges immediately and works in the background:
 
-```bash
-ssh-keygen -t ed25519 -C "agents-agency-deploy" -f ./web3-skills-deploy-key -N ""
+```
+You: @Andy build an ERC-20 staking contract with 30-day lockup
+Andy: On it.
+Andy: ⚙️ Planning — involving Solidity Dev and Risk Manager
+Andy: ⚙️ Solidity Developer: round 4, last action: run_command
+Andy: Contract complete. 8/8 tests passing. Risk Manager found one medium issue...
 ```
 
-This creates:
-- `web3-skills-deploy-key` — private key (goes in `secrets/git_deploy_key`)
-- `web3-skills-deploy-key.pub` — public key (added to GitHub)
+### Adding GitHub repositories
 
-### 2. Add the public key to the GitHub repository
+Andy can work across multiple repos in the same project:
 
-Go to **github.com/protofire/web3-skills → Settings → Deploy keys → Add deploy key**
+```
+You: @Andy add our contracts repo https://github.com/myorg/contracts
+Andy: Cloned contracts → /workspace/contracts. Ready to work in it.
 
-- Title: `nanoclaw-agency-[your-project-name]`
-- Key: paste the contents of `web3-skills-deploy-key.pub`
-- **Do NOT check** "Allow write access"
-
-### 3. Place the private key in secrets/
-
-```bash
-cp web3-skills-deploy-key secrets/git_deploy_key
-chmod 600 secrets/git_deploy_key
-rm web3-skills-deploy-key web3-skills-deploy-key.pub
+You: @Andy add the frontend repo https://github.com/myorg/frontend
+Andy: Cloned frontend → /workspace/frontend.
 ```
 
-> The `secrets/git_deploy_key` file is in `.gitignore` — it will never be committed.
+### Receiving documents
+
+Andy delivers artifacts directly in Discord:
+
+```
+You: @Andy write an architecture overview and send it to me as a PDF
+Andy: [uploads architecture.pdf as Discord attachment]
+```
+
+Agents can produce any file type. PDF generation uses `pandoc` (pre-installed).
+
+### Interrupting and pivoting
+
+Send a new message at any time to cancel the current task and redirect:
+
+```
+You: @Andy build a lending protocol
+Andy: On it.
+... (working) ...
+You: @Andy actually, focus on the staking contract first
+Andy: Noted — pivoting to your new request.
+```
+
+### Decisions
+
+Andy asks for your input only when genuinely needed:
+
+```
+Andy: **Decision needed:**
+      Reentrancy found in withdraw(). How should we fix it?
+
+      Options:
+      1. Add nonReentrant guard (OpenZeppelin)
+      2. Redesign withdraw flow (checks-effects-interactions)
+      3. Deprioritise — flag for audit
+
+You: 1
+Andy: On it — applying nonReentrant guard...
+```
 
 ---
 
-## Cost Tracking
+## Model Routing
 
-The `skills/track-cost.ts` module logs per-call costs to stdout and fires a Discord warning when your session spend crosses `COST_WARNING_THRESHOLD_USD` (default: $5).
+Configure which model each role uses in `config/models.json`. No code changes needed.
 
-View live costs:
+| Role | Default Model | Reasoning |
+|---|---|---|
+| Project Manager | `anthropic/claude-opus-4-6` | High-reasoning, client-facing quality |
+| Solutions Architect | `anthropic/claude-opus-4-6` | Architecture decisions require deep thinking |
+| Risk Manager | `anthropic/claude-opus-4-6` | Security is high-stakes |
+| Tech Lead | `anthropic/claude-sonnet-4-6` | Code review and coordination |
+| Frontend Dev | `anthropic/claude-sonnet-4-6` | React/Next.js development |
+| Backend Dev | `anthropic/claude-sonnet-4-6` | APIs and services |
+| DevOps | `anthropic/claude-sonnet-4-6` | Infrastructure |
+| Solidity Dev | `anthropic/claude-sonnet-4-6` | Smart contract development |
 
-```bash
-docker compose logs -f agency | grep cost-tracker
-```
-
-Example output:
-
-```
-[cost-tracker] solidity-dev (openrouter/xai/grok-4.2) in=1842 out=723 cost=$0.0198 | session_total=$0.1432
-[cost-tracker] THRESHOLD EXCEEDED: ⚠️ Cost Warning — Project acme-defi has spent $5.03 USD this session
-```
-
-To change the threshold, update `COST_WARNING_THRESHOLD_USD` in your `.env`.
+All models route through [OpenRouter](https://openrouter.ai/) — one key, all providers.
 
 ---
 
 ## Repository Structure
 
 ```
-jpkapinha/agents-agency/
-├── versions.lock              # Pinned versions for all dependencies
+agents-agency/
+├── Dockerfile                    # Node 22 + Foundry + Hardhat + gh CLI + pandoc
+├── docker-compose.yml            # Single-command launcher
+├── versions.lock                 # Pinned versions for agency-agents
+├── .env.example                  # Copy to .env and fill in
 ├── config/
-│   └── models.json            # Declarative model routing per role
-├── Dockerfile                 # Multi-stage build: Node 22 + Foundry + Hardhat + NanoClaw
-├── docker-compose.yml         # Single-command agency launcher
-├── .env.example               # Copy to .env and fill in your values
+│   └── models.json               # Model routing per agent role
 ├── setup/
-│   ├── entrypoint.sh          # Bootstrap orchestrator
-│   ├── install-agency-agents.sh  # Clones msitarzewski/agency-agents
-│   ├── load-web3-skills.sh    # SSH-clones protofire/web3-skills (private)
-│   └── customize-pm.sh        # Wires PM to Discord, silences other agents
+│   ├── entrypoint.sh             # Bootstrap: agency-agents → git config → launch bot
+│   ├── install-agency-agents.sh  # Clones msitarzewski/agency-agents (187 roles)
+│   ├── load-web3-skills.sh       # Optional: SSH-clones private web3-skills repo
+│   └── customize-pm.sh           # Validates Discord token format
 ├── skills/
-│   └── track-cost.ts          # Real-time cost tracking + Discord alerts
-├── .github/
-│   └── workflows/
-│       └── build.yml          # CI: build + push to ghcr.io/jpkapinha/agents-agency
-├── .devcontainer/
-│   └── devcontainer.json      # VS Code / GitHub Codespaces config
-├── project-data/              # Your project's code and files (mounted at /workspace)
-└── secrets/                   # Place your git_deploy_key here (gitignored)
+│   ├── bot.ts                    # Andy: Discord client, PM agentic loop, tool dispatch
+│   ├── agents.ts                 # Core team + external specialist definitions and runner
+│   ├── tools.ts                  # Agent tools: read/write files, run commands, git
+│   ├── state.ts                  # Project state: tasks, decisions, blockers, repos
+│   ├── track-cost.ts             # Cost tracking (informational)
+│   └── package.json              # discord.js + tsx
+├── project-data/                 # Your project's workspace (mounted at /workspace)
+│   └── .agency/                  # Auto-created: state.json, conversation history
+└── secrets/                      # Place git_deploy_key here for private skills (gitignored)
 ```
 
+### Persistent storage
+
+Everything in `project-data/` (mounted as `/workspace`) survives container restarts:
+
+| Path | Contents |
+|---|---|
+| `/workspace/.agency/state.json` | Tasks, decisions, blockers, registered repos |
+| `/workspace/.agency/history-{channelId}.json` | Andy's conversation history per channel |
+| `/workspace/{repo-name}/` | Cloned GitHub repositories |
+| `/workspace/` | All files agents write (contracts, components, docs, etc.) |
+
 ---
 
-## Updating Pinned Versions
+## Agent Capabilities
 
-All external dependency versions are locked in `versions.lock`. To upgrade:
+### What agents can do
 
-1. Edit `versions.lock` with the new version tags
-2. Run `docker compose build --no-cache`
-3. Test with `docker compose up`
-4. Commit the updated `versions.lock`
+| Tool | Who has it | What it does |
+|---|---|---|
+| `read_file` | All agents | Read any file in `/workspace` |
+| `write_file` | Builders only | Write/create files in `/workspace` |
+| `list_files` | All agents | List files recursively |
+| `run_command` | Builders only | Run shell commands (forge, npm, gh, pandoc, etc.) |
+| `git_status` / `git_diff` | DevOps | Check repo state |
+| `git_commit` | DevOps | Commit changes (only when Andy includes `[COMMIT APPROVED]`) |
+
+**Builder roles** (can write and execute): `solidity-dev`, `frontend-dev`, `backend-dev`, `devops`
+
+**Advisor roles** (read-only): `tech-lead`, `solutions-architect`, `risk-manager`
+
+**External specialists** (187 roles, read-only): hired by Andy via `hire_specialist` for UX, legal, marketing, data science, technical writing, and more.
+
+### What agents produce
+
+- Smart contracts (`forge build`, `forge test`)
+- Frontend components (React, Next.js, Tailwind)
+- Backend services (Node.js, TypeScript, APIs)
+- Infrastructure config (Docker, GitHub Actions)
+- Architecture documents (`/workspace/.agency/architecture.md`)
+- PDF reports (`pandoc doc.md -o doc.pdf`)
+- GitHub pull requests (`gh pr create`)
 
 ---
 
-## Enabling This as a GitHub Template
+## GitHub Integration
 
-After creating the repository:
+Add `GITHUB_TOKEN` to your `.env` to enable:
+
+- **Private repo cloning** — `@Andy add the repo https://github.com/myorg/private-contracts`
+- **Git push** — agents push branches after completing work
+- **Pull request creation** — `run_command("gh pr create --title '...' --body '...'")` in devops tasks
+- **Authenticated API calls** — `gh` CLI is pre-installed and authenticated at startup
+
+The token is configured via git URL rewrite so it is **never exposed in child process environments** — agents run in a sanitised env and git auth is transparent.
+
+**Required scopes:** `repo`, `workflow`
+
+---
+
+## Updating
+
+To pull the latest agency-agents role definitions, simply rebuild:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+The `install-agency-agents.sh` script re-clones `msitarzewski/agency-agents` at every startup, so role definitions always stay current without a rebuild.
+
+To upgrade pinned versions, edit `versions.lock` and rebuild.
+
+---
+
+## Optional: Private Web3 Skills
+
+If you have a private skills repository (custom patterns, good practices, internal tooling), you can load it at startup via SSH deploy key:
+
+### 1. Generate a key pair
+
+```bash
+ssh-keygen -t ed25519 -C "agents-agency-deploy" -f ./web3-skills-key -N ""
+```
+
+### 2. Add the public key to GitHub
+
+Go to your private repo → **Settings → Deploy keys → Add deploy key**. Paste `web3-skills-key.pub`. Read-only is sufficient.
+
+### 3. Place the private key in `secrets/`
+
+```bash
+cp web3-skills-key secrets/git_deploy_key
+chmod 600 secrets/git_deploy_key
+rm web3-skills-key web3-skills-key.pub
+```
+
+### 4. Set the repo URL in `.env`
+
+```env
+WEB3_SKILLS_REPO=git@github.com:yourorg/web3-skills.git
+```
+
+The `secrets/` directory is gitignored — the key will never be committed.
+
+---
+
+## Enabling as a GitHub Template
+
+After creating your fork:
 
 1. Go to **Settings → General**
 2. Check **"Template repository"**
-3. Your team can now use **"Use this template"** to spin up new projects instantly
+
+Your team can then click **"Use this template"** to spin up a new project instantly.
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. When contributing:
+Issues and PRs welcome.
 
-- Keep `versions.lock` up to date when changing dependency references
-- Test with `docker compose build && docker compose up` before opening a PR
-- The `protofire/web3-skills` skill library is maintained separately — open issues there for skill improvements
+- Keep `versions.lock` updated when changing dependency references
+- Test with `docker compose build && docker compose up -d` before opening a PR
+- The agent role definitions live in [msitarzewski/agency-agents](https://github.com/msitarzewski/agency-agents) — open issues there for role improvements
 
 ---
 
@@ -248,4 +395,4 @@ MIT — see [LICENSE](LICENSE) for details.
 
 ---
 
-*Built by [Protofire](https://protofire.io) using [NanoClaw](https://github.com/qwibitai/nanoclaw) and [agency-agents](https://github.com/msitarzewski/agency-agents).*
+*Built on [agency-agents](https://github.com/msitarzewski/agency-agents) and [OpenRouter](https://openrouter.ai/).*
