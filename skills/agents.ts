@@ -322,9 +322,17 @@ export async function runAgent(
       }
     }
 
-    if (onProgress && round > 0 && round % 3 === 0) {
-      const lastTool = msg.tool_calls[msg.tool_calls.length - 1].function.name;
-      onProgress(`${agentDef.name}: round ${round + 1}, last action: ${lastTool}`);
+    if (onProgress) {
+      const lastTc = msg.tool_calls[msg.tool_calls.length - 1];
+      let detail = '';
+      try {
+        const a = JSON.parse(lastTc.function.arguments) as Record<string, unknown>;
+        if (lastTc.function.name === 'run_command') detail = ` \`${(a['cmd'] as string).slice(0, 80)}\``;
+        else if (lastTc.function.name === 'write_file') detail = ` → ${a['path']}`;
+        else if (lastTc.function.name === 'read_file') detail = ` ${a['path']}`;
+        else if (lastTc.function.name === 'list_files') detail = ` ${a['dir'] ?? '.'}`;
+      } catch { /* ignore */ }
+      onProgress(`**${agentDef.name}** [${round + 1}] ${lastTc.function.name}${detail}`);
     }
   }
 
