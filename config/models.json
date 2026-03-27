@@ -1,0 +1,15 @@
+{
+  "roles": {
+    "project-manager": "openrouter/anthropic/claude-4.6-opus",
+    "product-manager": "openrouter/anthropic/claude-4.6-sonnet",
+    "tech-lead": "openrouter/anthropic/claude-4.6-sonnet",
+    "solutions-architect": "openrouter/anthropic/claude-4.6-opus",
+    "frontend-dev": "openrouter/anthropic/claude-4.6-sonnet",
+    "backend-dev": "openrouter/anthropic/claude-4.6-sonnet",
+    "solidity-dev": "openrouter/xai/grok-4.2",
+    "devops": "openrouter/anthropic/claude-4.6-sonnet",
+    "risk-manager": "openrouter/anthropic/claude-4.6-opus"
+  },
+  "default": "openrouter/anthropic/claude-4.6-sonnet",
+  "cost-warning-threshold-usd": 5
+}

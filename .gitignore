@@ -1,0 +1,72 @@
+# =============================================================================
+# jpkapinha/agents-agency — .gitignore
+# =============================================================================
+
+# ---- Environment & Secrets --------------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# The actual deploy key — NEVER commit this
+secrets/git_deploy_key
+secrets/*.pem
+secrets/*.key
+
+# ---- Project workspace data -------------------------------------------------
+# Keep the directory itself but ignore everything inside
+project-data/*
+!project-data/.gitkeep
+
+# ---- Node.js ----------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp
+.pnp.js
+
+# ---- TypeScript build output ------------------------------------------------
+dist/
+build/
+*.js.map
+*.d.ts
+
+# ---- Foundry / Hardhat artifacts --------------------------------------------
+cache/
+artifacts/
+out/
+typechain/
+typechain-types/
+
+# ---- Docker runtime ---------------------------------------------------------
+.docker/
+
+# ---- OS files ---------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ---- IDE files --------------------------------------------------------------
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- Logs -------------------------------------------------------------------
+logs/
+*.log
+
+# ---- Claude Code local settings ---------------------------------------------
+.claude/
+
+# ---- Temporary files --------------------------------------------------------
+tmp/
+temp/
+.tmp/

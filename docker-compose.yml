@@ -1,0 +1,74 @@
+version: "3.9"
+
+# =============================================================================
+# jpkapinha/agents-agency
+# Spin up the full Web3 agency with: docker compose up -d
+# =============================================================================
+
+secrets:
+  git_deploy_key:
+    file: ./secrets/git_deploy_key
+
+networks:
+  agency-net:
+    driver: bridge
+
+services:
+  # ---------------------------------------------------------------------------
+  # Core agency service — all AI agents run inside this container
+  # ---------------------------------------------------------------------------
+  agency:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/jpkapinha/agents-agency:latest
+    container_name: nanoclaw-agency
+    restart: unless-stopped
+
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false   # NanoClaw writes runtime state
+
+    # SSH deploy key for private web3-skills repo
+    secrets:
+      - git_deploy_key
+
+    environment:
+      # Loaded from .env file (copy .env.example → .env)
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
+      - DISCORD_PM_CHANNEL_ID=${DISCORD_PM_CHANNEL_ID}
+      - GITHUB_ORG=${GITHUB_ORG:-jpkapinha}
+      - PROJECT_NAME=${PROJECT_NAME:-my-web3-project}
+      - COST_WARNING_THRESHOLD_USD=${COST_WARNING_THRESHOLD_USD:-5}
+      - WEB3_SKILLS_REPO=${WEB3_SKILLS_REPO:-git@github.com:protofire/web3-skills.git}
+      - NODE_ENV=production
+
+    volumes:
+      # Project workspace — your code lives here
+      - ./project-data:/workspace
+      # Model routing config (read-only)
+      - ./config:/app/config:ro
+      # Docker socket passthrough for MicroVM sandboxing
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    networks:
+      - agency-net
+
+    # Healthcheck — verifies the agency process is alive
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('/app/nanoclaw/dist/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

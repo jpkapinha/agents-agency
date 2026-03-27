@@ -1,0 +1,24 @@
+# Normalize line endings: all text files use LF in the repo
+* text=auto eol=lf
+
+# Shell scripts MUST use LF — CRLF breaks bash on Linux containers
+*.sh text eol=lf
+
+# TypeScript and JSON — LF
+*.ts  text eol=lf
+*.js  text eol=lf
+*.json text eol=lf
+
+# Docker files — LF
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+
+# Markdown — LF
+*.md text eol=lf
+
+# Binary files — no line ending conversion
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz  binary
+*.zip binary
