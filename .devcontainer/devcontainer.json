@@ -1,0 +1,58 @@
+{
+  "name": "NanoClaw Web3 Agency",
+  "image": "ghcr.io/jpkapinha/agents-agency:latest",
+
+  // Use Docker-outside-of-Docker so agent containers can be spawned
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "moby": false,
+      "installDockerBuildx": true
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    }
+  },
+
+  // Copy the env template on first open
+  "postCreateCommand": "[ -f .env ] || cp .env.example .env && echo 'Fill in your .env values before running docker compose up -d'",
+
+  // Forward ports if NanoClaw exposes a local dashboard
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "NanoClaw Dashboard",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "NomicFoundation.hardhat-solidity",
+        "tintinweb.solidity-visual-auditor",
+        "ms-vscode.vscode-typescript-next",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "typescript.preferences.importModuleSpecifier": "relative",
+        "solidity.compileUsingRemoteVersion": "latest",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/home/agency/.foundry/bin"
+  },
+
+  "mounts": [
+    "source=${localWorkspaceFolder}/project-data,target=/workspace,type=bind"
+  ],
+
+  "remoteUser": "agency"
+}
