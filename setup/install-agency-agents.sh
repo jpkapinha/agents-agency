@@ -7,7 +7,7 @@ set -euo pipefail
 
 APP_DIR="/app"
 AGENCY_AGENTS_DIR="${APP_DIR}/agency-agents"
-NANOCLAW_ROLES_DIR="${APP_DIR}/nanoclaw/roles"
+NANOCLAW_ROLES_DIR="${APP_DIR}/roles"
 VERSIONS_LOCK="${APP_DIR}/versions.lock"
 
 log() { echo "[install-agency-agents] $*"; }

@@ -16,7 +16,7 @@ warn() { echo "[agency] $(date -u +%H:%M:%SZ)  WARN  $*" >&2; }
 die()  { echo "[agency] $(date -u +%H:%M:%SZ)  ERROR $*" >&2; exit 1; }
 
 log "========================================================="
-log "  Protofire NanoClaw Web3 Agency — starting up"
+log "  agents-agency — Andy the Project Manager"
 log "  Project: ${PROJECT_NAME:-unknown}"
 log "========================================================="
 
@@ -60,47 +60,10 @@ log "Step 3/3 — Configuring Project Manager Discord integration..."
 log "Step 3/3 — Done."
 
 # ---------------------------------------------------------------------------
-# Apply model routing from config/models.json
+# Launch Discord bot
 # ---------------------------------------------------------------------------
-log "Applying model routing from /app/config/models.json..."
-if [[ -f "${APP_DIR}/nanoclaw/dist/configure-models.js" ]]; then
-  node "${APP_DIR}/nanoclaw/dist/configure-models.js" \
-    --config "${APP_DIR}/config/models.json" \
-    || warn "Model configuration step returned non-zero — continuing anyway."
-fi
-
-# ---------------------------------------------------------------------------
-# Register cost-tracking skill
-# ---------------------------------------------------------------------------
-log "Registering cost-tracking skill..."
-if [[ -f "${APP_DIR}/skills/track-cost.ts" ]]; then
-  ts-node "${APP_DIR}/skills/track-cost.ts" --register \
-    || warn "Cost tracking skill registration failed — continuing without it."
-fi
-
-# ---------------------------------------------------------------------------
-# Launch NanoClaw agency
-# ---------------------------------------------------------------------------
-log "Starting NanoClaw agency process..."
-
-# FIX: Original assumed dist/index.js is pre-built, but NanoClaw ships only
-#      TypeScript source — dist/ is never built in the image. Fall back to tsx.
-# FIX: Use direct binary path (node_modules/.bin/tsx) instead of npx so that
-#      SIGTERM is forwarded directly to the process, not swallowed by npx.
-if [[ -f "${APP_DIR}/nanoclaw/dist/index.js" ]]; then
-  NANOCLAW_CMD="node ${APP_DIR}/nanoclaw/dist/index.js"
-elif [[ -f "${APP_DIR}/nanoclaw/src/index.ts" ]]; then
-  log "dist/index.js not found — running via tsx (source mode)"
-  NANOCLAW_CMD="${APP_DIR}/nanoclaw/node_modules/.bin/tsx ${APP_DIR}/nanoclaw/src/index.ts"
-else
-  die "NanoClaw entrypoint not found. Was the image built correctly?"
-fi
-
-log "Starting Discord bot (OpenRouter backend)..."
-# FIX: NanoClaw requires an OneCLI service on port 10254 that is not included
-#      in this image. skills/bot.ts is a self-contained Discord bot that calls
-#      OpenRouter directly, providing equivalent interactive functionality.
-BOT_CMD="${APP_DIR}/nanoclaw/node_modules/.bin/tsx ${APP_DIR}/skills/bot.ts"
+log "Starting Andy the Project Manager (Discord + OpenRouter)..."
+BOT_CMD="${APP_DIR}/skills/node_modules/.bin/tsx ${APP_DIR}/skills/bot.ts"
 
 _shutdown() {
   log "Shutdown signal received — stopping bot PID ${BOT_PID}"
