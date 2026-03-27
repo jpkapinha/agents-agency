@@ -42,6 +42,14 @@ export interface Blocker {
   resolvedAt?: string;
 }
 
+export interface Repo {
+  name: string;
+  url: string;
+  localPath: string;
+  branch: string;
+  addedAt: string;
+}
+
 export interface ProjectState {
   projectName: string;
   summary?: string;
@@ -49,6 +57,7 @@ export interface ProjectState {
   tasks: Task[];
   decisions: Decision[];
   blockers: Blocker[];
+  repos: Repo[];
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +83,7 @@ function defaultState(): ProjectState {
     tasks: [],
     decisions: [],
     blockers: [],
+    repos: [],
   };
 }
 
@@ -148,6 +158,30 @@ export function resolveDecision(id: string, answer: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Repo helpers
+// ---------------------------------------------------------------------------
+
+export function addRepo(url: string, name: string, branch = 'main'): Repo {
+  const state = loadState();
+  const existing = state.repos.find(r => r.name === name);
+  if (existing) return existing;
+  const repo: Repo = {
+    name,
+    url,
+    localPath: `/workspace/${name}`,
+    branch,
+    addedAt: now(),
+  };
+  state.repos.push(repo);
+  saveState(state);
+  return repo;
+}
+
+export function getRepos(): Repo[] {
+  return loadState().repos;
+}
+
+// ---------------------------------------------------------------------------
 // Blocker helpers
 // ---------------------------------------------------------------------------
 
@@ -186,7 +220,11 @@ export function formatStateForPM(): string {
   if (openDecisions.length) lines.push(`\n**Open decisions:** ${openDecisions.map(d => d.question.slice(0, 80)).join('; ')}`);
   if (openBlockers.length) lines.push(`\n**Open blockers:** ${openBlockers.map(b => b.description.slice(0, 80)).join('; ')}`);
 
-  if (state.tasks.length === 0 && openDecisions.length === 0) {
+  if (state.repos.length) {
+    lines.push(`\n**Repos:** ${state.repos.map(r => `${r.name} → ${r.localPath} (${r.url})`).join(', ')}`);
+  }
+
+  if (state.tasks.length === 0 && openDecisions.length === 0 && state.repos.length === 0) {
     lines.push('\n(No tasks yet)');
   }
 
