@@ -7,6 +7,7 @@
  *
  * Agents now run agentic loops with real tools (read/write files, run commands).
  */
+import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import {
   Client,
   Events,
@@ -31,6 +32,7 @@ const PROJECT_NAME         = process.env.PROJECT_NAME          || 'Web3 Project'
 const TRIGGER              = /^@andy\b/i;
 const MODELS_CONFIG        = '/app/config/models.json';
 const ROLES_DIR            = '/app/roles';
+const HISTORY_DIR          = '/workspace/.agency';
 
 if (!DISCORD_BOT_TOKEN)  { console.error('DISCORD_BOT_TOKEN is not set');  process.exit(1); }
 if (!OPENROUTER_API_KEY) { console.error('OPENROUTER_API_KEY is not set'); process.exit(1); }
@@ -50,8 +52,30 @@ console.log(`[bot] External roster: ${externalAgents.length} specialists availab
 let pmChannel: TextChannel | null = null;
 let currentExecution: AbortController | null = null;
 
-// Per-channel PM conversation history
+// Per-channel PM conversation history — in-memory cache, persisted to disk
 const histories: Record<string, ORMessage[]> = {};
+
+function saveHistory(channelId: string, history: ORMessage[]): void {
+  try {
+    mkdirSync(HISTORY_DIR, { recursive: true });
+    writeFileSync(
+      `${HISTORY_DIR}/history-${channelId}.json`,
+      JSON.stringify(history, null, 2),
+      'utf-8',
+    );
+  } catch (err) {
+    console.error('[bot] Failed to save history:', err);
+  }
+}
+
+function loadHistory(channelId: string): ORMessage[] {
+  try {
+    const raw = readFileSync(`${HISTORY_DIR}/history-${channelId}.json`, 'utf-8');
+    return JSON.parse(raw) as ORMessage[];
+  } catch {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Proactive messaging
@@ -255,7 +279,14 @@ async function runPMAsync(
   userMessage: string,
   signal: AbortSignal,
 ): Promise<void> {
-  const history = histories[channelId] ?? [];
+  // Load from disk if not already in memory (e.g. after a restart)
+  if (!histories[channelId]) {
+    histories[channelId] = loadHistory(channelId);
+    if (histories[channelId].length > 0) {
+      console.log(`[bot] Restored ${histories[channelId].length} messages from disk for channel ${channelId}`);
+    }
+  }
+  const history = histories[channelId];
   history.push({ role: 'user', content: userMessage });
 
   for (let round = 0; round < 15; round++) {
@@ -290,6 +321,7 @@ async function runPMAsync(
         await notifyUser(assistantMsg.content);
       }
       histories[channelId] = history.slice(-40);
+      saveHistory(channelId, histories[channelId]);
       return;
     }
 
@@ -326,6 +358,7 @@ async function runPMAsync(
   }
 
   histories[channelId] = history.slice(-40);
+  saveHistory(channelId, histories[channelId]);
   await notifyUser('I hit the maximum planning rounds. Please give me a more specific instruction to continue.');
 }
 
