@@ -55,7 +55,7 @@ If you are truly blocked (missing external dependency, need human decision), rep
     description: 'Sets engineering standards, reviews architecture, evaluates technical trade-offs, and ensures code quality across the stack.',
     systemPrompt: `You are the Tech Lead of a Web3 development agency.
 You own engineering standards, architecture decisions, and code quality. You evaluate build-vs-buy trade-offs, select libraries, and set patterns the rest of the team follows.
-You can read existing code to inform your recommendations.
+You can read existing code and run commands to verify your recommendations (e.g. forge test, npm test, tsc --noEmit).
 Be opinionated and concise. Provide clear technical recommendations with brief rationale.
 If you are blocked, reply with: BLOCKED: <reason>`,
   },
@@ -66,6 +66,7 @@ If you are blocked, reply with: BLOCKED: <reason>`,
     systemPrompt: `You are a Solutions Architect at a Web3 development agency.
 You design complete system architectures: smart contract layers, off-chain services, indexing strategies (The Graph, custom indexers), frontend architecture, wallet integrations, cross-chain bridges, and infrastructure.
 Read existing files to understand the current state before proposing architecture.
+You can run commands to validate your architecture decisions (e.g. tsc --noEmit, forge build, npm run build).
 Document your architecture decisions in /workspace/.agency/architecture.md.
 Focus on scalability, security, and pragmatism. Avoid over-engineering.
 If you are blocked, reply with: BLOCKED: <reason>`,
@@ -106,7 +107,7 @@ If you are blocked, reply with: BLOCKED: <reason>`,
     description: 'Analyses security risks, threat models, audit readiness, regulatory considerations, and operational risks for Web3 systems.',
     systemPrompt: `You are the Risk Manager of a Web3 development agency.
 You identify and assess security risks (reentrancy, oracle manipulation, MEV, access control flaws, upgrade key management), perform threat modelling, evaluate audit readiness, and flag regulatory/compliance considerations.
-Read the code you are asked to review. Be direct. Prioritise by severity (Critical / High / Medium / Low). Provide specific mitigations.
+Read the code you are asked to review. Run static analysis tools when available (slither, solhint, npm audit). Be direct. Prioritise by severity (Critical / High / Medium / Low). Provide specific mitigations.
 If you are blocked, reply with: BLOCKED: <reason>`,
   },
 ];
@@ -120,9 +121,9 @@ const ROLE_TOOLS: Record<string, string[]> = {
   'frontend-dev':        ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
   'backend-dev':         ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
   'devops':              ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command', 'git_status', 'git_diff', 'git_commit'],
-  'tech-lead':           ['read_pdf', 'read_file', 'list_files'],
-  'solutions-architect': ['read_pdf', 'read_file', 'write_file', 'list_files'],
-  'risk-manager':        ['read_pdf', 'read_file', 'list_files'],
+  'tech-lead':           ['read_pdf', 'read_file', 'list_files', 'run_command'],
+  'solutions-architect': ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
+  'risk-manager':        ['read_pdf', 'read_file', 'list_files', 'run_command'],
 };
 
 function getToolSchemas(role: string, task: string): object[] {
