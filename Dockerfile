@@ -1,11 +1,11 @@
 # =============================================================================
 # jpkapinha/agents-agency
-# Autonomous Web3 AI Agency — Andy the PM + specialist agents
+# Autonomous Web3 AI Agency — NanoClaw + Andy the PM + specialist agents
 # =============================================================================
 FROM node:22-bookworm-slim AS base
 
 LABEL org.opencontainers.image.source="https://github.com/jpkapinha/agents-agency"
-LABEL org.opencontainers.image.description="Autonomous Web3 AI Agency — Andy the PM coordinates specialist agents"
+LABEL org.opencontainers.image.description="Autonomous Web3 AI Agency — NanoClaw orchestrates Andy the PM + specialist agents"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # ---------------------------------------------------------------------------
@@ -48,8 +48,6 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # ---------------------------------------------------------------------------
 # Create non-root agency user
 # ---------------------------------------------------------------------------
-# FIX: Also add agency user to the docker group (gid 999) so it can access
-#      the Docker socket when running without cap_drop:ALL
 RUN groupadd --gid 999 docker 2>/dev/null || true \
     && groupadd --gid 1001 agency \
     && useradd --uid 1001 --gid agency --shell /bin/bash --create-home agency \
@@ -68,8 +66,6 @@ RUN curl -L https://foundry.paradigm.xyz | bash \
 # ---------------------------------------------------------------------------
 # Install Hardhat and global Node tooling
 # ---------------------------------------------------------------------------
-# FIX: Set npm prefix so global installs succeed as non-root user
-#      (without this, npm install -g fails with EACCES on /usr/local/lib)
 ENV NPM_CONFIG_PREFIX=/home/agency/.npm-global
 ENV PATH="/home/agency/.npm-global/bin:${PATH}"
 RUN npm install -g \
@@ -85,23 +81,50 @@ RUN npm install -g \
 COPY --chown=agency:agency versions.lock /app/versions.lock
 COPY --chown=agency:agency config/ /app/config/
 COPY --chown=agency:agency setup/ /app/setup/
-COPY --chown=agency:agency skills/ /app/skills/
 
 # Make all setup scripts executable
 RUN chmod +x /app/setup/*.sh
 
 # ---------------------------------------------------------------------------
-# Install skills dependencies (discord.js + tsx)
+# Clone NanoClaw and apply patches
 # ---------------------------------------------------------------------------
 USER root
-RUN cd /app/skills && npm install
+
+# Clone NanoClaw (pinned to main — see versions.lock)
+RUN git clone --depth 1 https://github.com/qwibitai/nanoclaw.git /app/nanoclaw \
+    && chown -R agency:agency /app/nanoclaw
+
+# Copy our skills into NanoClaw's src tree so relative imports work with tsx
+COPY --chown=agency:agency skills/ /app/nanoclaw/src/skills/
+
+# Replace NanoClaw's Docker-based container runner with our in-process dispatcher
+RUN cp /app/setup/nanoclaw-patches/container-runner.ts /app/nanoclaw/src/container-runner.ts \
+    && chown agency:agency /app/nanoclaw/src/container-runner.ts
+
+# Add Discord channel implementation for NanoClaw
+RUN cp /app/setup/nanoclaw-patches/discord.ts /app/nanoclaw/src/channels/discord.ts \
+    && chown agency:agency /app/nanoclaw/src/channels/discord.ts
+
+# Apply source patches: remove OneCLI, register Discord channel, add PM group auto-registration
+RUN node /app/setup/nanoclaw-patches/patch.cjs /app/nanoclaw
+
+# ---------------------------------------------------------------------------
+# Install NanoClaw dependencies (includes tsx, discord.js, better-sqlite3)
+# ---------------------------------------------------------------------------
+# better-sqlite3 requires native compilation — python3/make/g++ are installed above
+USER agency
+RUN cd /app/nanoclaw && npm install
 
 # ---------------------------------------------------------------------------
 # Pre-create runtime-writable directories
 # ---------------------------------------------------------------------------
+USER root
 RUN mkdir -p /workspace /app/agency-agents /app/web3-skills \
-    /app/roles /app/patterns
+    /app/roles /app/patterns \
+    && chown -R agency:agency /workspace /app/agency-agents /app/web3-skills \
+                              /app/roles /app/patterns
 
 VOLUME ["/workspace"]
 
+USER agency
 ENTRYPOINT ["/app/setup/entrypoint.sh"]

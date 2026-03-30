@@ -8,6 +8,7 @@ import { resolve, dirname, relative } from 'path';
 import { execSync } from 'child_process';
 
 const WORKSPACE = '/workspace';
+export const PATTERNS_DIR = '/app/patterns';
 const MAX_FILE_CHARS = 50_000;
 const MAX_LIST_ENTRIES = 500;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -17,6 +18,7 @@ const MAX_TIMEOUT_MS = 300_000;
 // Path safety
 // ---------------------------------------------------------------------------
 
+// Writes must stay inside /workspace.
 function resolveSafe(userPath: string): string {
   const abs = resolve(WORKSPACE, userPath);
   if (!abs.startsWith(WORKSPACE + '/') && abs !== WORKSPACE) {
@@ -25,12 +27,24 @@ function resolveSafe(userPath: string): string {
   return abs;
 }
 
+// Reads also allow /app/patterns (Protofire web3 best practices, read-only).
+function resolveSafeRead(userPath: string): string {
+  const abs = resolve(WORKSPACE, userPath);
+  if (
+    (abs.startsWith(WORKSPACE + '/') || abs === WORKSPACE) ||
+    (abs.startsWith(PATTERNS_DIR + '/') || abs === PATTERNS_DIR)
+  ) {
+    return abs;
+  }
+  throw new Error(`Path traversal denied: ${userPath}`);
+}
+
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
 
 export function readFile(filePath: string): { content: string; truncated: boolean } {
-  const abs = resolveSafe(filePath);
+  const abs = resolveSafeRead(filePath);
   try {
     const raw = readFileSync(abs, 'utf-8');
     if (raw.length > MAX_FILE_CHARS) {
@@ -53,8 +67,11 @@ export function writeFile(filePath: string, content: string): string {
 }
 
 export function listFiles(dirPath = '.'): string[] {
-  const abs = resolveSafe(dirPath);
+  const abs = resolveSafeRead(dirPath);
   const results: string[] = [];
+  // Determine display base: workspace paths shown relative, patterns paths shown as-is
+  const isPatterns = abs.startsWith(PATTERNS_DIR);
+  const base = isPatterns ? PATTERNS_DIR : WORKSPACE;
 
   function walk(dir: string) {
     if (results.length >= MAX_LIST_ENTRIES) return;
@@ -67,8 +84,7 @@ export function listFiles(dirPath = '.'): string[] {
     for (const entry of entries) {
       if (results.length >= MAX_LIST_ENTRIES) break;
       const full = resolve(dir, entry);
-      const rel = relative(WORKSPACE, full);
-      // Skip .git internals and .agency state dir from listings
+      const rel = relative(base, full);
       if (rel.startsWith('.git/') || entry === '.git') continue;
       try {
         const stat = statSync(full);
@@ -78,9 +94,7 @@ export function listFiles(dirPath = '.'): string[] {
         } else {
           results.push(rel);
         }
-      } catch {
-        // skip unreadable entries
-      }
+      } catch { /* skip unreadable entries */ }
     }
   }
 

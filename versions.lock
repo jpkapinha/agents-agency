@@ -1,4 +1,5 @@
 {
+  "nanoclaw": "qwibitai/nanoclaw@main",
   "agency-agents": "msitarzewski/agency-agents@main",
   "web3-skills": "main"
 }
