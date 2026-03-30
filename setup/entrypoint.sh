@@ -80,8 +80,12 @@ log "Step 3/3 — Done."
 # ---------------------------------------------------------------------------
 log "Starting NanoClaw (Andy the Project Manager)..."
 
-mkdir -p /workspace/.agency
-cd /workspace/.agency
+# NanoClaw's DATA_DIR/STORE_DIR/GROUPS_DIR resolve relative to cwd.
+# Run from /app/nanoclaw so state lives in the container filesystem (writable
+# by agency regardless of host volume ownership).
+# bot.ts history and state.json go to /workspace/.agency (best-effort).
+mkdir -p /workspace/.agency 2>/dev/null || true
+cd /app/nanoclaw
 
 NANOCLAW_BIN="${APP_DIR}/nanoclaw/node_modules/.bin/tsx"
 NANOCLAW_SRC="${APP_DIR}/nanoclaw/src/index.ts"

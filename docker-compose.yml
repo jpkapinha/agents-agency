@@ -5,6 +5,14 @@ version: "3.9"
 # Spin up the full Web3 agency with: docker compose up -d
 # =============================================================================
 
+# SSH deploy key for private protofire/web3-skills access.
+# Create it: see README.md → "SSH Deploy Key Setup"
+# If the file does not exist, comment out this block and the `secrets:` key
+# under the service — the agency will still start, just without web3-skills.
+secrets:
+  git_deploy_key:
+    file: ./secrets/git_deploy_key
+
 networks:
   agency-net:
     driver: bridge
@@ -18,9 +26,8 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ghcr.io/jpkapinha/agents-agency:latest
-    # FIX: Renamed from nanoclaw-agency — NanoClaw's cleanupOrphans() scans
-    #      for containers matching "nanoclaw-*" and stops them, which caused
-    #      the container to kill itself seconds after starting
+    # NOTE: Do NOT name this "nanoclaw-*" — NanoClaw's cleanupOrphans() scans
+    #       for containers matching that prefix and will stop itself on startup.
     container_name: project0-agency
     restart: unless-stopped
 
@@ -31,10 +38,8 @@ services:
       - ALL
     read_only: false   # NanoClaw writes runtime state
 
-    # FIX: Removed top-level `secrets:` block and service `secrets:` reference
-    #      — secrets/git_deploy_key does not exist in the repo; Docker Compose
-    #      errors out at startup if a referenced secret file is missing.
-    #      The load-web3-skills.sh script already handles the missing-key case.
+    secrets:
+      - git_deploy_key
 
     environment:
       # Loaded from .env file (copy .env.example → .env)
@@ -60,9 +65,6 @@ services:
     networks:
       - agency-net
 
-    # FIX: Changed healthcheck from `node -e "require('/app/nanoclaw/dist/health')"` —
-    #      dist/ is never built (NanoClaw runs via tsx from source), so that check
-    #      always fails and the container is permanently marked unhealthy
     healthcheck:
       test: ["CMD", "pgrep", "-f", "tsx"]
       interval: 30s

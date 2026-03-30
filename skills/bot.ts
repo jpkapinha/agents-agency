@@ -9,7 +9,7 @@
  *   handleMessage(content, channelId, signal, send, sendFile)
  *   resolveDecision(channelId, answer) → boolean
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { resolve, basename } from 'path';
 import {
   AGENTS,
@@ -26,6 +26,7 @@ const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
 const PROJECT_NAME          = process.env.PROJECT_NAME          || 'Web3 Project';
 const MODELS_CONFIG         = '/app/config/models.json';
 const ROLES_DIR             = '/app/roles';
+const PATTERNS_DIR          = '/app/patterns';
 const HISTORY_DIR           = '/workspace/.agency';
 const WORKSPACE             = '/workspace';
 
@@ -113,6 +114,16 @@ export function resolveDecision(channelId: string, answer: string): boolean {
 // PM system prompt
 // ---------------------------------------------------------------------------
 
+function patternsNote(): string {
+  try {
+    const files = readdirSync(PATTERNS_DIR).filter(f => !f.startsWith('.'));
+    if (!files.length) return '';
+    return `\n**Protofire Web3 Patterns** are loaded at \`${PATTERNS_DIR}/\` (${files.length} files). When delegating to specialists, mention relevant patterns or ask them to check that directory.\n`;
+  } catch {
+    return '';
+  }
+}
+
 function buildPMSystemPrompt(): string {
   const state = formatStateForPM();
   return `You are Andy, the Project Manager of a Web3 development agency. You are the sole point of contact with the client — all other agents work internally.
@@ -138,7 +149,7 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 
 **Current project state:**
 ${state}
-
+${patternsNote()}
 Current project: ${PROJECT_NAME}`;
 }
 

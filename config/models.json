@@ -1,12 +1,12 @@
 {
   "roles": {
-    "project-manager": "openrouter/anthropic/claude-4.6-opus",
+    "project-manager": "openrouter/anthropic/claude-4.6-sonnet",
     "product-manager": "openrouter/anthropic/claude-4.6-sonnet",
     "tech-lead": "openrouter/anthropic/claude-4.6-sonnet",
     "solutions-architect": "openrouter/anthropic/claude-4.6-opus",
     "frontend-dev": "openrouter/anthropic/claude-4.6-sonnet",
     "backend-dev": "openrouter/anthropic/claude-4.6-sonnet",
-    "solidity-dev": "openrouter/xai/grok-4.2",
+    "solidity-dev": "openrouter/anthropic/claude-4.6-sonnet",
     "devops": "openrouter/anthropic/claude-4.6-sonnet",
     "risk-manager": "openrouter/anthropic/claude-4.6-opus"
   },
