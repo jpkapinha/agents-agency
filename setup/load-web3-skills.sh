@@ -8,7 +8,7 @@ set -euo pipefail
 
 APP_DIR="/app"
 WEB3_SKILLS_DIR="${APP_DIR}/web3-skills"
-NANOCLAW_SKILLS_DIR="${APP_DIR}/nanoclaw/skills"
+NANOCLAW_SKILLS_DIR="${APP_DIR}/skills"
 DEPLOY_KEY_PATH="/run/secrets/git_deploy_key"
 
 log()  { echo "[load-web3-skills] $*"; }
@@ -90,8 +90,8 @@ fi
 PATTERNS_SOURCE="${WEB3_SKILLS_DIR}/patterns"
 if [[ -d "${PATTERNS_SOURCE}" ]]; then
   log "Copying Protofire patterns and good practices..."
-  mkdir -p "${APP_DIR}/nanoclaw/patterns"
-  cp -r "${PATTERNS_SOURCE}/." "${APP_DIR}/nanoclaw/patterns/"
+  mkdir -p "${APP_DIR}/patterns"
+  cp -r "${PATTERNS_SOURCE}/." "${APP_DIR}/patterns/"
 fi
 
 # ---------------------------------------------------------------------------
