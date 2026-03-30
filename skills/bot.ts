@@ -20,7 +20,7 @@ import {
   type ExternalAgentDef,
 } from './agents.js';
 import { formatStateForPM, addRepo } from './state.js';
-import { runCommand } from './tools.js';
+import { runCommand, readPdf } from './tools.js';
 
 const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
 const PROJECT_NAME          = process.env.PROJECT_NAME          || 'Web3 Project';
@@ -179,6 +179,7 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 8. Use \`add_repo\` when the client provides a GitHub URL — clone it once, then agents work within /workspace/{name}.
 9. Use \`send_artifact\` to deliver documents and files: architecture docs, audit reports, specs, PDFs. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents can push code and open PRs via: run_command("gh pr create ...").
 10. Use \`fetch_url\` whenever the client shares a link (Google Drive, Notion export, GitHub raw, etc.) BEFORE delegating — specialists cannot download URLs themselves. Fetch first, then pass the extracted content in the task description.
+11. Use \`read_pdf\` whenever the client attaches a PDF file directly. The message will include a path like \`/workspace/.agency/uploads/filename.pdf\` — call \`read_pdf\` with that path immediately to get the content, then proceed.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -297,6 +298,21 @@ const ADD_REPO_TOOL = {
   },
 };
 
+const READ_PDF_TOOL = {
+  type: 'function',
+  function: {
+    name: 'read_pdf',
+    description: 'Extract and return the text content of a PDF file that was attached by the client. Use the path reported in the message (e.g. /workspace/.agency/uploads/filename.pdf). Call this immediately when a PDF is attached before doing anything else.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to the PDF, e.g. "/workspace/.agency/uploads/report.pdf"' },
+      },
+      required: ['path'],
+    },
+  },
+};
+
 const FETCH_URL_TOOL = {
   type: 'function',
   function: {
@@ -316,6 +332,7 @@ const FETCH_URL_TOOL = {
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
+  READ_PDF_TOOL,
   FETCH_URL_TOOL,
   SEND_UPDATE_TOOL,
   REQUEST_DECISION_TOOL,
@@ -552,6 +569,13 @@ async function dispatchPMTool(
     case 'send_artifact': {
       await sendArtifact(args['path'] as string, args['description'] as string | undefined, sendFile);
       return `Artifact sent: ${args['path']}`;
+    }
+
+    case 'read_pdf': {
+      const result = readPdf(args['path'] as string);
+      return result.truncated
+        ? `${result.content}\n\n[truncated at 50K chars]`
+        : result.content;
     }
 
     case 'fetch_url': {
