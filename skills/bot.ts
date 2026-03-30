@@ -9,7 +9,7 @@
  *   handleMessage(content, channelId, signal, send, sendFile)
  *   resolveDecision(channelId, answer) → boolean
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { resolve, basename } from 'path';
 import {
   AGENTS,
@@ -29,6 +29,7 @@ const MODELS_CONFIG         = '/app/config/models.json';
 const ROLES_DIR             = '/app/roles';
 const PATTERNS_DIR          = '/app/patterns';
 const HISTORY_DIR           = '/workspace/.agency';
+const ARTIFACTS_DIR         = '/workspace/.agency/artifacts';
 const WORKSPACE             = '/workspace';
 
 if (!OPENROUTER_API_KEY) { console.error('[bot] OPENROUTER_API_KEY is not set'); process.exit(1); }
@@ -98,6 +99,69 @@ function bgRemove(channelId: string, id: string): void {
 
 function bgList(channelId: string): BgTask[] {
   return bgPool.get(channelId) ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Artifact helpers
+// Artifacts live in /workspace/.agency/artifacts/ — the same folder that is
+// mounted to project-data/.agency/artifacts/ on the host machine, so the
+// client can open and edit them with any text editor at any time.
+// ---------------------------------------------------------------------------
+
+const ARTIFACT_DESCRIPTIONS: Record<string, string> = {
+  'prd.md':           'Product Requirements Document',
+  'backlog.md':       'Product backlog — prioritised user stories',
+  'tasks.md':         'Current sprint tasks',
+  'architecture.md':  'System architecture decisions',
+  'decisions.md':     'Architecture decision log',
+  'changelog.md':     'Change log — pivots and updates',
+  'change-plan.md':   'Active change / pivot plan',
+  'risk-report.md':   'Security risk assessment',
+};
+
+function ensureArtifactsDir(): void {
+  mkdirSync(ARTIFACTS_DIR, { recursive: true });
+}
+
+function listArtifactFiles(): Array<{ name: string; description: string; size: number; modified: string }> {
+  try {
+    ensureArtifactsDir();
+    return readdirSync(ARTIFACTS_DIR)
+      .filter((f) => f.endsWith('.md') || f.endsWith('.txt'))
+      .map((f) => {
+        try {
+          const st = statSync(`${ARTIFACTS_DIR}/${f}`);
+          return {
+            name: f,
+            description: ARTIFACT_DESCRIPTIONS[f] ?? f.replace(/[-_]/g, ' ').replace(/\.\w+$/, ''),
+            size: st.size,
+            modified: st.mtime.toISOString().slice(0, 16).replace('T', ' '),
+          };
+        } catch { return null; }
+      })
+      .filter(Boolean) as Array<{ name: string; description: string; size: number; modified: string }>;
+  } catch {
+    return [];
+  }
+}
+
+function writeArtifact(name: string, content: string): string {
+  ensureArtifactsDir();
+  // Sanitise filename — alphanumeric, hyphens, dots only
+  const safe = name.replace(/[^a-zA-Z0-9.\-_]/g, '-').replace(/\.\.+/g, '.');
+  const path = `${ARTIFACTS_DIR}/${safe}`;
+  writeFileSync(path, content, 'utf-8');
+  return path;
+}
+
+function readArtifact(name: string): string {
+  ensureArtifactsDir();
+  const safe = name.replace(/[^a-zA-Z0-9.\-_]/g, '-').replace(/\.\.+/g, '.');
+  try {
+    return readFileSync(`${ARTIFACTS_DIR}/${safe}`, 'utf-8');
+  } catch {
+    return `(artifact "${name}" not found)`;
+  }
 }
 
 const modelMap       = loadModelMap(MODELS_CONFIG);
@@ -252,6 +316,16 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 13. Use \`create_prd\` BEFORE dispatching ANY development work. When the client describes requirements, call \`create_prd\` first to structure them into a PRD, then \`send_artifact\` the PRD (".agency/prd.md"), then \`request_decision\` asking the client to review and type APPROVED. Only dispatch dev agents after receiving APPROVED.
 14. Use \`get_running_tasks\` when the client asks how things are going — it shows which agents are active and how long they've been running.
 15. Use \`wait_for_tasks\` when the NEXT step truly depends on the output of a currently running task (e.g. "audit the contract once it's written"). Otherwise, just dispatch and move on.
+16. **Artifact collaboration workflow:** All project documents live in the shared folder \`project-data/.agency/artifacts/\` on the client's machine (inside the container: \`/workspace/.agency/artifacts/\`). The client can open and edit any artifact with their text editor at any time. After \`create_prd\`, always call \`list_artifacts\` so the client knows what to review. Before dispatching development agents, always call \`read_artifact\` to get the latest version the client may have edited.
+17. Use \`update_artifact\` to create or revise project documents beyond the PRD — backlog updates, architecture decisions (\`architecture.md\`), sprint task lists (\`tasks.md\`), or any structured document the client should review.
+18. Use \`list_artifacts\` whenever the client asks "what do we have?", "show me the documents", or "what files are there" — or proactively after creating new artifacts.
+19. **Pivot / mid-development realignment:** If the client requests changes after development has started, do NOT simply restart from scratch. Follow this flow:
+    a. Acknowledge the pivot and call \`read_artifact("prd.md")\` and \`read_artifact("backlog.md")\` to understand current state.
+    b. Call \`update_artifact("change-plan.md", ...)\` with a structured plan: what changes are needed, which agents to retask, which files to modify.
+    c. Call \`send_artifact\` for \`change-plan.md\` and ask the client to review it (editable at \`project-data/.agency/artifacts/change-plan.md\`).
+    d. Call \`request_decision\` asking the client to confirm the change plan (type APPROVED or ask for revisions).
+    e. Once approved: update \`prd.md\` and \`backlog.md\` to reflect the new direction, then dispatch the minimal set of agents needed to implement the changes — referencing the change plan in each task description.
+    f. Call \`update_memory\` to record the pivot decision.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -498,6 +572,46 @@ const WAIT_FOR_TASKS_TOOL = {
   },
 };
 
+const LIST_ARTIFACTS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'list_artifacts',
+    description: 'List all project artifacts (PRD, backlog, tasks, architecture docs, etc.) stored in the shared artifacts folder. Call this to show the client what files exist and can be reviewed or edited.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
+const READ_ARTIFACT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'read_artifact',
+    description: 'Read the current content of an artifact file from the shared folder. Use before delegating to agents so they have the latest version — the client may have edited the file locally.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Artifact filename, e.g. "prd.md", "backlog.md", "change-plan.md"' },
+      },
+      required: ['name'],
+    },
+  },
+};
+
+const UPDATE_ARTIFACT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'update_artifact',
+    description: 'Write or update an artifact file in the shared folder. Use to create or revise project documents such as the backlog, architecture decisions, change plan, or task list. The client can open and edit these files locally at any time.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Artifact filename, e.g. "backlog.md", "change-plan.md", "tasks.md"' },
+        content: { type: 'string', description: 'Full Markdown content to write to the file' },
+      },
+      required: ['name', 'content'],
+    },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -513,6 +627,9 @@ const PM_TOOLS = [
   GET_COSTS_TOOL,
   GET_RUNNING_TASKS_TOOL,
   WAIT_FOR_TASKS_TOOL,
+  LIST_ARTIFACTS_TOOL,
+  READ_ARTIFACT_TOOL,
+  UPDATE_ARTIFACT_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -946,10 +1063,29 @@ async function dispatchPMTool(
         `*Review this document. When satisfied, reply **APPROVED** to start development.*`,
       ].join('\n');
 
-      mkdirSync('/workspace/.agency', { recursive: true });
-      writeFileSync('/workspace/.agency/prd.md', prdContent, 'utf-8');
+      writeArtifact('prd.md', prdContent);
 
-      return `PRD written to /workspace/.agency/prd.md (${prdContent.length} chars). Now call send_artifact with path=".agency/prd.md" and description "📋 PRD ready for review", then request_decision asking the client to review and type APPROVED before development begins.`;
+      // Auto-generate a backlog skeleton from user stories
+      const backlogContent = [
+        `# Backlog: ${title}`,
+        ``,
+        `**Status:** DRAFT — edit before development starts`,
+        `**Updated:** ${new Date().toISOString().slice(0, 10)}`,
+        ``,
+        `---`,
+        ``,
+        `## Prioritised User Stories`,
+        ``,
+        stories.map((s: string, i: number) => `### US-${String(i + 1).padStart(2, '0')}: ${s}\n- **Priority:** TBD\n- **Effort:** TBD\n- **Status:** Not started\n`).join('\n'),
+        `---`,
+        ``,
+        `*Edit priorities and effort estimates before typing APPROVED.*`,
+      ].join('\n');
+
+      writeArtifact('backlog.md', backlogContent);
+
+      const artifactsHostPath = 'project-data/.agency/artifacts/';
+      return `PRD written to ${ARTIFACTS_DIR}/prd.md and backlog.md created. Host path: ${artifactsHostPath} — client can edit both files locally. Now call list_artifacts to show the client what to review, then send_artifact for prd.md with description "📋 PRD ready for review", then request_decision asking the client to review both files (editable at ${artifactsHostPath}) and type APPROVED before development begins.`;
     }
 
     case 'get_costs': {
@@ -994,6 +1130,34 @@ async function dispatchPMTool(
       await notifyUser(`⏳ Waiting for ${tasks.length} background task(s) to complete…`, send);
       await Promise.allSettled(tasks.map(t => t.promise));
       return 'All background tasks completed. Ready to proceed.';
+    }
+
+    case 'list_artifacts': {
+      const files = listArtifactFiles();
+      if (!files.length) {
+        return 'No artifacts yet. Use create_prd to generate the first artifacts (PRD + backlog).';
+      }
+      const hostPath = 'project-data/.agency/artifacts/';
+      const lines = [
+        `**Project artifacts** (edit locally at \`${hostPath}\`):`,
+        '',
+        ...files.map(f => `• **${f.name}** — ${f.description} (${(f.size / 1024).toFixed(1)} KB, last modified ${f.modified})`),
+        '',
+        `*Open any file in \`${hostPath}\` with your editor. Changes are reflected immediately.*`,
+      ];
+      return lines.join('\n');
+    }
+
+    case 'read_artifact': {
+      const name = args['name'] as string;
+      return readArtifact(name);
+    }
+
+    case 'update_artifact': {
+      const name    = args['name'] as string;
+      const content = args['content'] as string;
+      const path    = writeArtifact(name, content);
+      return `Artifact "${name}" written (${content.length} chars) → ${path}`;
     }
 
     default:
