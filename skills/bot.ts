@@ -178,6 +178,7 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 7. Answer simple questions (greetings, status, clarifications) directly — no need to call agents.
 8. Use \`add_repo\` when the client provides a GitHub URL — clone it once, then agents work within /workspace/{name}.
 9. Use \`send_artifact\` to deliver documents and files: architecture docs, audit reports, specs, PDFs. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents can push code and open PRs via: run_command("gh pr create ...").
+10. Use \`fetch_url\` whenever the client shares a link (Google Drive, Notion export, GitHub raw, etc.) BEFORE delegating — specialists cannot download URLs themselves. Fetch first, then pass the extracted content in the task description.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -296,9 +297,26 @@ const ADD_REPO_TOOL = {
   },
 };
 
+const FETCH_URL_TOOL = {
+  type: 'function',
+  function: {
+    name: 'fetch_url',
+    description: 'Download a document or file from a URL and return its text content. Supports Google Drive share links, GitHub raw URLs, and direct file links. Use this BEFORE delegating to specialists whenever the client shares a link — specialists cannot download URLs themselves.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'URL to fetch. Google Drive share links are automatically converted to direct downloads.' },
+        filename: { type: 'string', description: 'Optional filename hint (e.g. "prd.pdf"). Helps determine how to process the content.' },
+      },
+      required: ['url'],
+    },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
+  FETCH_URL_TOOL,
   SEND_UPDATE_TOOL,
   REQUEST_DECISION_TOOL,
   GET_STATE_TOOL,
@@ -534,6 +552,52 @@ async function dispatchPMTool(
     case 'send_artifact': {
       await sendArtifact(args['path'] as string, args['description'] as string | undefined, sendFile);
       return `Artifact sent: ${args['path']}`;
+    }
+
+    case 'fetch_url': {
+      const rawUrl  = args['url'] as string;
+      const hint    = (args['filename'] as string | undefined) ?? '';
+      const UPLOAD_DIR = '/workspace/.agency/uploads';
+
+      // Convert Google Drive share links → direct download URL
+      let downloadUrl = rawUrl;
+      const driveMatch = rawUrl.match(/drive\.google\.com\/file\/d\/([^/?]+)/);
+      if (driveMatch) {
+        downloadUrl = `https://drive.google.com/uc?export=download&id=${driveMatch[1]}`;
+      }
+
+      // Derive filename for local storage
+      const urlFilename = hint || rawUrl.split('/').pop()?.split('?')[0] || 'document';
+      const localPath   = `${UPLOAD_DIR}/${Date.now()}-${urlFilename}`;
+
+      // Download
+      const dlResult = runCommand(
+        `mkdir -p "${UPLOAD_DIR}" && curl -sL -A "Mozilla/5.0" -o "${localPath}" "${downloadUrl}"`,
+        60_000,
+      );
+      if (dlResult.exitCode !== 0) {
+        return `Failed to download ${rawUrl}:\n${dlResult.stderr || dlResult.stdout}`;
+      }
+
+      // Extract text — try pandoc first (handles PDF, docx, html, etc.), fall back to cat
+      const ext = urlFilename.split('.').pop()?.toLowerCase() ?? '';
+      let text = '';
+      if (['pdf', 'docx', 'odt', 'html', 'htm'].includes(ext)) {
+        const extractResult = runCommand(`pandoc "${localPath}" -t plain 2>/dev/null`, 30_000);
+        text = extractResult.stdout.trim();
+      }
+      if (!text) {
+        const catResult = runCommand(`cat "${localPath}" 2>/dev/null`, 10_000);
+        text = catResult.stdout.trim();
+      }
+
+      if (!text) {
+        return `Downloaded to ${localPath} but could not extract text. File may be binary or require special handling.`;
+      }
+
+      const MAX = 60_000;
+      const preview = text.length > MAX ? text.slice(0, MAX) + '\n...(content truncated)' : text;
+      return `Fetched: ${rawUrl}\nSaved to: ${localPath}\n\n--- Document Content ---\n${preview}\n--- End ---`;
     }
 
     case 'add_repo': {
