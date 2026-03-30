@@ -1,7 +1,7 @@
 /**
  * Agent registry and execution for the Web3 agency.
  *
- * Core team agents run in agentic loops (up to 20 rounds) with file/exec tools.
+ * Core team agents run in agentic loops (up to 40 rounds × 3 segments = 120 effective rounds) with file/exec tools.
  * External agents (from agency-agents roster) run as single-turn consultants.
  */
 import { readFileSync, readdirSync, existsSync } from 'fs';
@@ -306,67 +306,123 @@ export async function runAgent(
 
   console.log(`[agent] ${agentDef.name} (${model}) starting — task: ${task.slice(0, 80)}...`);
 
-  let totalPrompt = 0;
+  // -------------------------------------------------------------------------
+  // Agentic loop with auto-continuation.
+  // Each segment runs up to MAX_ROUNDS_PER_SEGMENT iterations. If the agent
+  // runs out of rounds without finishing, we inject a "continue" prompt and
+  // start a new segment — up to MAX_SEGMENTS times. This gives up to
+  // 40 × 3 = 120 effective rounds, enough for complex multi-file tasks.
+  // -------------------------------------------------------------------------
+  const MAX_ROUNDS_PER_SEGMENT = 40;
+  const MAX_SEGMENTS           = 3;
+
+  let totalPrompt     = 0;
   let totalCompletion = 0;
+  let completedActions: string[] = []; // summary for continuation prompts
+  let totalRounds = 0;
 
-  for (let round = 0; round < 20; round++) {
-    const data = await callOpenRouter(model, messages, tools, apiKey);
-    if (data.usage) {
-      totalPrompt     += data.usage.prompt_tokens;
-      totalCompletion += data.usage.completion_tokens;
-    }
-    const choice = data.choices[0];
-    const msg = choice.message;
-    messages.push(msg);
+  for (let segment = 0; segment < MAX_SEGMENTS; segment++) {
 
-    if (choice.finish_reason !== 'tool_calls' || !msg.tool_calls?.length) {
-      const output = msg.content ?? '(no response)';
-      if (output.startsWith('BLOCKED:')) {
-        return { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim(), tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
+    if (segment > 0) {
+      // Inject auto-continuation prompt so the agent knows where it left off
+      const actionSummary = completedActions.length
+        ? completedActions.slice(-30).join('\n')
+        : '(no tool actions recorded)';
+      messages.push({
+        role: 'user',
+        content: [
+          `⚙️ AUTO-CONTINUATION (segment ${segment + 1}/${MAX_SEGMENTS}): You reached the iteration limit but the task is not yet complete.`,
+          ``,
+          `Tool actions completed so far:`,
+          actionSummary,
+          ``,
+          `Please review what has been done, then continue and complete the remaining work. Do not repeat steps already finished.`,
+        ].join('\n'),
+      });
+      if (onProgress) {
+        onProgress(`↩️ **${agentDef.name}** — auto-continuing (segment ${segment + 1}/${MAX_SEGMENTS})`);
       }
-      console.log(`[agent] ${agentDef.name} done (${round + 1} rounds)`);
-      return { status: 'done', output, tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
+      console.log(`[agent] ${agentDef.name} segment ${segment + 1} starting — ${totalRounds} rounds used so far`);
     }
 
-    // Execute tool calls
-    const toolResults: ORMessage[] = [];
-    for (const tc of msg.tool_calls) {
-      let result: string;
-      try {
-        const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-        console.log(`[agent] ${agentDef.name} → tool: ${tc.function.name}(${Object.values(args).map(v => String(v).slice(0, 40)).join(', ')})`);
-        result = executeTool(tc.function.name, args);
-      } catch (err) {
-        result = `Tool error: ${(err as Error).message}`;
+    for (let round = 0; round < MAX_ROUNDS_PER_SEGMENT; round++) {
+      totalRounds++;
+
+      const data = await callOpenRouter(model, messages, tools, apiKey);
+      if (data.usage) {
+        totalPrompt     += data.usage.prompt_tokens;
+        totalCompletion += data.usage.completion_tokens;
       }
-      toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
-    }
-    messages.push(...toolResults);
+      const choice = data.choices[0];
+      const msg = choice.message;
+      messages.push(msg);
 
-    // Truncate old tool results after round 10 to prevent context blowout
-    if (round === 10) {
-      for (let i = 2; i < messages.length - 10; i++) {
-        if (messages[i].role === 'tool' && messages[i].content && messages[i].content!.length > 500) {
-          messages[i] = { ...messages[i], content: `[truncated — ${messages[i].content!.length} chars]` };
+      if (choice.finish_reason !== 'tool_calls' || !msg.tool_calls?.length) {
+        const output = msg.content ?? '(no response)';
+        if (output.startsWith('BLOCKED:')) {
+          return { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim(), tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
+        }
+        console.log(`[agent] ${agentDef.name} done (${totalRounds} rounds, ${segment + 1} segment(s))`);
+        return { status: 'done', output, tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
+      }
+
+      // Execute tool calls
+      const toolResults: ORMessage[] = [];
+      for (const tc of msg.tool_calls) {
+        let result: string;
+        try {
+          const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+          console.log(`[agent] ${agentDef.name} → tool: ${tc.function.name}(${Object.values(args).map(v => String(v).slice(0, 40)).join(', ')})`);
+          result = executeTool(tc.function.name, args);
+        } catch (err) {
+          result = `Tool error: ${(err as Error).message}`;
+        }
+        // Track for continuation summaries
+        try {
+          const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+          const brief = tc.function.name === 'write_file'
+            ? `write_file(${args['path']})`
+            : tc.function.name === 'run_command'
+            ? `run_command: ${String(args['cmd']).slice(0, 80)}`
+            : `${tc.function.name}(${Object.values(args).map(v => String(v).slice(0, 40)).join(', ')})`;
+          completedActions.push(brief);
+        } catch { /* ignore */ }
+        toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
+      }
+      messages.push(...toolResults);
+
+      // Truncate old tool results at halfway through the segment to prevent
+      // context blowout (preserves recent context, shrinks older results)
+      if (round === Math.floor(MAX_ROUNDS_PER_SEGMENT / 2)) {
+        for (let i = 2; i < messages.length - 10; i++) {
+          if (messages[i].role === 'tool' && messages[i].content && messages[i].content!.length > 500) {
+            messages[i] = { ...messages[i], content: `[truncated — ${messages[i].content!.length} chars]` };
+          }
         }
       }
-    }
 
-    if (onProgress) {
-      const lastTc = msg.tool_calls[msg.tool_calls.length - 1];
-      let detail = '';
-      try {
-        const a = JSON.parse(lastTc.function.arguments) as Record<string, unknown>;
-        if (lastTc.function.name === 'run_command') detail = ` \`${(a['cmd'] as string).slice(0, 80)}\``;
-        else if (lastTc.function.name === 'write_file') detail = ` → ${a['path']}`;
-        else if (lastTc.function.name === 'read_file') detail = ` ${a['path']}`;
-        else if (lastTc.function.name === 'list_files') detail = ` ${a['dir'] ?? '.'}`;
-      } catch { /* ignore */ }
-      onProgress(`**${agentDef.name}** [${round + 1}] ${lastTc.function.name}${detail}`);
+      if (onProgress) {
+        const lastTc = msg.tool_calls[msg.tool_calls.length - 1];
+        let detail = '';
+        try {
+          const a = JSON.parse(lastTc.function.arguments) as Record<string, unknown>;
+          if (lastTc.function.name === 'run_command') detail = ` \`${(a['cmd'] as string).slice(0, 80)}\``;
+          else if (lastTc.function.name === 'write_file') detail = ` → ${a['path']}`;
+          else if (lastTc.function.name === 'read_file') detail = ` ${a['path']}`;
+          else if (lastTc.function.name === 'list_files') detail = ` ${a['dir'] ?? '.'}`;
+        } catch { /* ignore */ }
+        onProgress(`**${agentDef.name}** [${totalRounds}] ${lastTc.function.name}${detail}`);
+      }
     }
+    // Segment exhausted — loop to next segment
   }
 
-  return { status: 'blocked', output: 'Max rounds reached without completing the task.', blocker: 'Exceeded 20 iterations', tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
+  return {
+    status: 'blocked',
+    output: `Task not completed after ${totalRounds} rounds across ${MAX_SEGMENTS} segments. The agent may be stuck in a loop or the task may require human input.`,
+    blocker: `Exceeded ${MAX_ROUNDS_PER_SEGMENT * MAX_SEGMENTS} total iterations`,
+    tokensUsed: { prompt: totalPrompt, completion: totalCompletion },
+  };
 }
 
 // ---------------------------------------------------------------------------

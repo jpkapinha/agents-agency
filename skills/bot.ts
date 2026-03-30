@@ -716,7 +716,7 @@ async function runPMAsync(
   // Convert to multimodal content if message contains image URL markers
   history.push({ role: 'user', content: toMultimodalContent(userMessage) });
 
-  for (let round = 0; round < 15; round++) {
+  for (let round = 0; round < 20; round++) {
     if (signal.aborted) return;
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -789,7 +789,7 @@ async function runPMAsync(
 
   histories[channelId] = history.slice(-40);
   saveHistory(channelId, histories[channelId]);
-  await notifyUser('I hit the maximum planning rounds. Please give me a more specific instruction to continue.', send);
+  await notifyUser('I hit 20 planning rounds without finishing. Something may be ambiguous — please give me a more specific instruction to continue.', send);
 }
 
 async function dispatchPMTool(
