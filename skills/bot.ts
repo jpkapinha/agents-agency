@@ -181,6 +181,7 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 10. Use \`fetch_url\` whenever the client shares a link (Google Drive, Notion export, GitHub raw, etc.) BEFORE delegating — specialists cannot download URLs themselves. Fetch first, then pass the extracted content in the task description.
 11. Use \`read_pdf\` whenever the client attaches a PDF file directly. The message will include a path like \`/workspace/.agency/uploads/filename.pdf\` — call \`read_pdf\` with that path immediately to get the content, then proceed.
 12. Use \`update_memory\` to record tech stack choices, key decisions, and milestones as they happen. This persists across Docker restarts and sessions.
+13. Use \`create_prd\` BEFORE dispatching ANY development work. When the client describes requirements, call \`create_prd\` first to structure them into a PRD, then \`send_artifact\` the PRD (".agency/prd.md"), then \`request_decision\` asking the client to review and type APPROVED. Only dispatch dev agents after receiving APPROVED.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -364,6 +365,42 @@ const UPDATE_MEMORY_TOOL = {
   },
 };
 
+const CREATE_PRD_TOOL = {
+  type: 'function',
+  function: {
+    name: 'create_prd',
+    description: 'Generate a structured Product Requirements Document from the client\'s requirements. Writes the PRD to /workspace/.agency/prd.md. Call this BEFORE dispatching any development tasks. After calling this, use send_artifact to share the PRD with the client, then request_decision to get explicit approval before proceeding.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Project or feature title' },
+        problem: { type: 'string', description: 'Problem statement — what problem does this solve and for whom?' },
+        user_stories: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of user stories in "As a <user>, I want to <action> so that <benefit>" format',
+        },
+        acceptance_criteria: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Specific, testable conditions that must be met for the feature to be considered done',
+        },
+        tech_constraints: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Technical constraints or requirements',
+        },
+        out_of_scope: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Features or requirements explicitly excluded from this deliverable',
+        },
+      },
+      required: ['title', 'problem', 'user_stories', 'acceptance_criteria'],
+    },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -375,6 +412,7 @@ const PM_TOOLS = [
   SEND_ARTIFACT_TOOL,
   ADD_REPO_TOOL,
   UPDATE_MEMORY_TOOL,
+  CREATE_PRD_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -692,6 +730,57 @@ async function dispatchPMTool(
       });
       const mem = getMemory();
       return `Memory updated. Current state — Tech stack: ${mem.techStack.join(', ') || 'none'} | Key decisions: ${mem.keyDecisions.length} recorded | Milestones: ${mem.milestones.length} recorded`;
+    }
+
+    case 'create_prd': {
+      const title       = args['title'] as string;
+      const problem     = args['problem'] as string;
+      const stories     = (args['user_stories'] as string[]) ?? [];
+      const criteria    = (args['acceptance_criteria'] as string[]) ?? [];
+      const constraints = (args['tech_constraints'] as string[]) ?? [];
+      const oos         = (args['out_of_scope'] as string[]) ?? [];
+
+      const prdContent = [
+        `# PRD: ${title}`,
+        ``,
+        `**Status:** DRAFT — awaiting client approval`,
+        `**Created:** ${new Date().toISOString().slice(0, 10)}`,
+        ``,
+        `---`,
+        ``,
+        `## Problem Statement`,
+        ``,
+        problem,
+        ``,
+        `## User Stories`,
+        ``,
+        stories.map((s: string) => `- ${s}`).join('\n'),
+        ``,
+        `## Acceptance Criteria`,
+        ``,
+        criteria.map((c: string, i: number) => `${i + 1}. ${c}`).join('\n'),
+        ``,
+        ...(constraints.length ? [
+          `## Technical Constraints`,
+          ``,
+          constraints.map((c: string) => `- ${c}`).join('\n'),
+          ``,
+        ] : []),
+        ...(oos.length ? [
+          `## Out of Scope`,
+          ``,
+          oos.map((o: string) => `- ${o}`).join('\n'),
+          ``,
+        ] : []),
+        `---`,
+        ``,
+        `*Review this document. When satisfied, reply **APPROVED** to start development.*`,
+      ].join('\n');
+
+      mkdirSync('/workspace/.agency', { recursive: true });
+      writeFileSync('/workspace/.agency/prd.md', prdContent, 'utf-8');
+
+      return `PRD written to /workspace/.agency/prd.md (${prdContent.length} chars). Now call send_artifact with path=".agency/prd.md" and description "📋 PRD ready for review", then request_decision asking the client to review and type APPROVED before development begins.`;
     }
 
     default:
