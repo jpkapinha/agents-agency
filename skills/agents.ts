@@ -381,10 +381,12 @@ export async function runExternalAgent(
   }
 
   const model = modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
-  const systemPrompt = context ? `${match.systemPrompt}\n\nProject context: ${context}` : match.systemPrompt;
+  const reportPath = `/workspace/.agency/reports/${match.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.md`;
+  const systemPrompt = (context ? `${match.systemPrompt}\n\nProject context: ${context}` : match.systemPrompt) +
+    `\n\nWrite your analysis, recommendations, and deliverables to: ${reportPath}\nUse write_file to persist your output so the team can reference it later.`;
 
-  // External agents get read-only tools (conservative default)
-  const tools = ['read_file', 'list_files'].map(n => TOOL_SCHEMAS[n]);
+  // External agents get read + write tools so they can persist their analysis
+  const tools = ['read_file', 'list_files', 'write_file'].map(n => TOOL_SCHEMAS[n]);
 
   const messages: ORMessage[] = [
     { role: 'system', content: systemPrompt },
