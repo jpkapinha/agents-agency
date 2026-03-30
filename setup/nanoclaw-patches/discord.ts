@@ -22,7 +22,7 @@ const DISCORD_BOT_TOKEN     = process.env['DISCORD_BOT_TOKEN']     ?? '';
 const DISCORD_PM_CHANNEL_ID = process.env['DISCORD_PM_CHANNEL_ID'] ?? '';
 const UPLOAD_DIR            = '/workspace/.agency/uploads';
 
-const TRIGGER    = /^@andy\b/i;
+const TRIGGER    = /^@andy\b/i;  // still stripped if present, but no longer required
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
 
 // ---------------------------------------------------------------------------
@@ -119,12 +119,9 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
   client.on(Events.MessageCreate, async (message: Message) => {
     if (message.author.bot) return;
 
-    const botId       = client.user?.id ?? '';
-    const isMentioned = message.mentions.users.has(botId);
-    const isTrigger   = TRIGGER.test(message.content.trim());
-    if (!isMentioned && !isTrigger) return;
-
-    // Strip mention / trigger prefix
+    // Every message in the PM channel goes to Andy — no trigger word needed.
+    // Strip @mention / @andy prefix if the user included one, but don't require it.
+    const botId = client.user?.id ?? '';
     let content = message.content
       .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
       .replace(TRIGGER, '')
