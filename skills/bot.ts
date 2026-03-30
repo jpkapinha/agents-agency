@@ -19,7 +19,7 @@ import {
   runExternalAgent,
   type ExternalAgentDef,
 } from './agents.js';
-import { formatStateForPM, addRepo, updateMemory, getMemory } from './state.js';
+import { formatStateForPM, addRepo, updateMemory, getMemory, addTask, updateTask } from './state.js';
 import { runCommand, readPdf } from './tools.js';
 
 const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
@@ -570,6 +570,11 @@ async function dispatchPMTool(
       const agentDef = AGENTS.find(a => a.role === role);
       const agentName = agentDef?.name ?? role;
       const taskPreview = task.length > 120 ? task.slice(0, 120) + '…' : task;
+
+      // Register task in project state before starting
+      const trackedTask = addTask(taskPreview, role);
+      updateTask(trackedTask.id, { status: 'in-progress' });
+
       await notifyUser(`🔧 **${agentName}** — ${taskPreview}`, send);
       const result = await runAgent(
         role,
@@ -579,10 +584,14 @@ async function dispatchPMTool(
         OPENROUTER_API_KEY,
         (msg) => notifyUser(`⚙️ ${msg}`, send),
       );
+
       if (result.status === 'blocked') {
+        updateTask(trackedTask.id, { status: 'blocked', result: result.blocker });
         await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`, send);
         return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
       }
+
+      updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 500) });
       await notifyUser(`✅ **${agentName}** — done`, send);
       return result.output;
     }
