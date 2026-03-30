@@ -8,7 +8,8 @@
     "backend-dev": "openrouter/anthropic/claude-4.6-sonnet",
     "solidity-dev": "openrouter/anthropic/claude-4.6-sonnet",
     "devops": "openrouter/moonshotai/kimi-k2.5",
-    "risk-manager": "openrouter/anthropic/claude-4.6-opus"
+    "risk-manager": "openrouter/anthropic/claude-4.6-opus",
+    "qa-verifier": "openrouter/moonshotai/kimi-k2.5"
   },
   "default": "openrouter/moonshotai/kimi-k2.5",
   "cost-warning-threshold-usd": 5

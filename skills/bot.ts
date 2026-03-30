@@ -837,6 +837,30 @@ async function dispatchPMTool(
       // the PM loop finishes or is aborted by a new incoming message.
       const bg = (text: string) => channelSend(channelId, text).catch(() => {});
 
+      // -----------------------------------------------------------------------
+      // Helper: run the QA Verifier and return the verdict string.
+      // QA Verifier is read-only and fast — it just reads files to confirm
+      // that claimed deliverables actually exist and aren't stubs.
+      // -----------------------------------------------------------------------
+      const runQA = async (checkedAgentName: string, originalTask: string, agentOutput: string): Promise<string> => {
+        const qaTask = [
+          `Original task given to ${checkedAgentName}:`,
+          originalTask,
+          ``,
+          `${checkedAgentName}'s claimed output:`,
+          agentOutput.slice(0, 2000),
+          ``,
+          `Verify that all claimed deliverables exist and have real content.`,
+        ].join('\n');
+        try {
+          const qa = await runAgent('qa-verifier', qaTask, `Project: ${PROJECT_NAME}`, modelMap, OPENROUTER_API_KEY, undefined);
+          logCost(`QA:${taskPreview.slice(0, 60)}`, modelMap['qa-verifier'] ?? modelMap['__default__'] ?? 'unknown', qa.tokensUsed.prompt, qa.tokensUsed.completion);
+          return qa.output;
+        } catch (err) {
+          return `QA error: ${(err as Error).message}`;
+        }
+      };
+
       const promise = (async () => {
         try {
           const result = await runAgent(
@@ -862,7 +886,71 @@ async function dispatchPMTool(
 
           await bg(`✅ **${agentName}** — done (${prompt + completion} tokens, ${formatCost(costUsd)})`);
 
-          // Automated test gate for builder roles
+          // ---------------------------------------------------------------
+          // QA Verification — runs after EVERY agent, regardless of role.
+          // If QA finds missing or stub files, the agent is retried once
+          // with the specific QA feedback included in the task.
+          // ---------------------------------------------------------------
+          await bg(`🔎 **QA** — verifying ${agentName}'s deliverables…`);
+          let qaOutput = await runQA(agentName, taskPreview, result.output);
+
+          const qaVerified = qaOutput.includes('VERIFIED:') || qaOutput.includes('SKIPPED:');
+          const qaFailed   = qaOutput.includes('FAILED:') || qaOutput.includes('PARTIAL:');
+
+          if (qaVerified) {
+            // Extract just the verdict line for a clean message
+            const verdictLine = qaOutput.split('\n').find(l => l.startsWith('VERIFIED:') || l.startsWith('SKIPPED:')) ?? qaOutput.slice(0, 200);
+            await bg(`✅ **QA** — ${verdictLine}`);
+          } else if (qaFailed) {
+            await bg(`⚠️ **QA** — issues found:\n${qaOutput.slice(0, 400)}`);
+
+            // Auto-retry the original agent with QA feedback embedded
+            await bg(`🔄 **${agentName}** — retrying to fix QA issues…`);
+            const retryTask = [
+              task,
+              ``,
+              `═══ QA FEEDBACK — must fix before finishing ═══`,
+              qaOutput.slice(0, 800),
+              `═══════════════════════════════════════════════`,
+              ``,
+              `The QA Verifier found missing or stub files in your previous attempt.`,
+              `Please create or fix every file listed above. After each write_file call,`,
+              `immediately call read_file on the same path to confirm the write succeeded.`,
+              `Do not finish until read_file confirms every deliverable exists and has real content.`,
+            ].join('\n');
+
+            const retryResult = await runAgent(
+              role,
+              retryTask,
+              `Project: ${PROJECT_NAME}`,
+              modelMap,
+              OPENROUTER_API_KEY,
+              (msg) => bg(`⚙️ [retry] ${msg}`),
+            );
+            const retryModel = modelMap[role] ?? modelMap['__default__'] ?? 'unknown';
+            logCost(`retry:${taskPreview.slice(0, 60)}`, retryModel, retryResult.tokensUsed.prompt, retryResult.tokensUsed.completion);
+
+            if (retryResult.status === 'blocked') {
+              updateTask(trackedTask.id, { status: 'blocked', result: `QA failed + retry blocked: ${retryResult.blocker}` });
+              await bg(`❌ **${agentName}** — retry blocked: ${retryResult.blocker}`);
+              return;
+            }
+
+            // Second QA pass after retry
+            await bg(`🔎 **QA** — re-verifying after retry…`);
+            qaOutput = await runQA(agentName, taskPreview, retryResult.output);
+            const retryVerified = qaOutput.includes('VERIFIED:') || qaOutput.includes('SKIPPED:');
+            const retryEmoji = retryVerified ? '✅' : '⚠️';
+            const retryVerdictLine = qaOutput.split('\n').find(l => /^(VERIFIED|PARTIAL|FAILED|SKIPPED):/.test(l)) ?? qaOutput.slice(0, 200);
+            await bg(`${retryEmoji} **QA** (re-check) — ${retryVerdictLine}`);
+          } else {
+            // QA returned an unexpected format — just relay it
+            await bg(`🔎 **QA** — ${qaOutput.slice(0, 300)}`);
+          }
+
+          // ---------------------------------------------------------------
+          // Tech-lead test gate — builder roles only, runs after QA
+          // ---------------------------------------------------------------
           const BUILDER_ROLES = ['solidity-dev', 'frontend-dev', 'backend-dev'];
           if (BUILDER_ROLES.includes(role)) {
             await bg(`🔍 **Tech Lead** — verifying tests…`);
@@ -891,10 +979,10 @@ async function dispatchPMTool(
             await bg(`${verdict} **Tech Lead** — ${verifyResult.output.slice(0, 300)}`);
             updateTask(trackedTask.id, {
               status: 'done',
-              result: result.output.slice(0, 300) + ' | Tests: ' + verifyResult.output.slice(0, 200),
+              result: result.output.slice(0, 300) + ' | QA: ' + qaOutput.slice(0, 100) + ' | Tests: ' + verifyResult.output.slice(0, 150),
             });
           } else {
-            updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 500) });
+            updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 400) + ' | QA: ' + qaOutput.slice(0, 100) });
           }
         } catch (err) {
           await bg(`❌ **${agentName}** — unexpected error: ${(err as Error).message}`);
