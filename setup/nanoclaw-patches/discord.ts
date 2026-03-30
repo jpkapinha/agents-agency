@@ -1,20 +1,11 @@
 /**
  * Discord channel for NanoClaw — implements the Channel interface using discord.js.
  *
- * Self-registers via registerChannel('discord', factory) so that NanoClaw's
- * channels/index.ts barrel import activates it automatically at startup.
- *
- * Flow:
- *   Discord message → MessageCreate → opts.onMessage(chatJid, msg)
- *     → NanoClaw stores in SQLite → message loop picks up
- *     → runContainerAgent → our skills/bot.ts PM loop
- *     → onOutput callback → channel.sendMessage → Discord
- *
  * Attachment handling:
- *   PDFs       → downloaded + text extracted via pandoc, injected into message
- *   Images     → downloaded + [IMAGE_URL:url] marker added (vision in bot.ts)
- *   Text files → downloaded + content injected inline
- *   Other      → downloaded + file path noted for agents to use
+ *   PDFs       → downloaded via Node fetch + text extracted via pandoc
+ *   Images     → [IMAGE_URL:url] marker added (vision in bot.ts)
+ *   Text files → content injected inline
+ *   Other      → file path noted for agents
  */
 import {
   Client,
@@ -23,29 +14,27 @@ import {
   Message,
   TextChannel,
 } from 'discord.js';
-import { execSync } from 'child_process';
-import { mkdirSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { Channel, NewMessage } from '../types.js';
 import { ChannelOpts, registerChannel } from './registry.js';
 
 const DISCORD_BOT_TOKEN     = process.env['DISCORD_BOT_TOKEN']     ?? '';
 const DISCORD_PM_CHANNEL_ID = process.env['DISCORD_PM_CHANNEL_ID'] ?? '';
 const UPLOAD_DIR            = '/workspace/.agency/uploads';
-const MAX_TEXT_CHARS        = 50_000;
+const MAX_TEXT_CHARS        = 60_000;
 
-// Match @andy (case-insensitive) OR @<bot-mention>
-const TRIGGER = /^@andy\b/i;
-
-// ---------------------------------------------------------------------------
-// Attachment processing
-// ---------------------------------------------------------------------------
-
+const TRIGGER    = /^@andy\b/i;
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
 const TEXT_EXTS  = new Set(['md', 'txt', 'json', 'yaml', 'yml', 'ts', 'js',
                              'sol', 'csv', 'toml', 'env', 'sh', 'py', 'rs',
                              'go', 'java', 'html', 'css', 'xml', 'sql']);
 
-function processAttachments(message: Message): string {
+// ---------------------------------------------------------------------------
+// Attachment processing — async, uses Node fetch (no shell escaping issues)
+// ---------------------------------------------------------------------------
+
+async function processAttachments(message: Message): Promise<string> {
   if (message.attachments.size === 0) return '';
 
   try { mkdirSync(UPLOAD_DIR, { recursive: true }); } catch { /* exists */ }
@@ -58,11 +47,15 @@ function processAttachments(message: Message): string {
     const ext      = filename.split('.').pop()?.toLowerCase() ?? '';
     const localPath = `${UPLOAD_DIR}/${Date.now()}-${filename}`;
 
-    // Download the file
+    // Download using Node.js fetch — avoids all shell-escaping issues with
+    // Discord CDN signed URLs (ex=, is=, hm= params)
     try {
-      execSync(`curl -sL "${url}" -o "${localPath}"`, { timeout: 30_000 });
-    } catch {
-      parts.push(`[Attachment: ${filename} (URL: ${url}) — download failed]`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      writeFileSync(localPath, buf);
+    } catch (err) {
+      parts.push(`[Attachment: ${filename} — download failed: ${err}]`);
       continue;
     }
 
@@ -72,10 +65,12 @@ function processAttachments(message: Message): string {
 
     } else if (ext === 'pdf') {
       try {
-        const raw = execSync(
-          `pandoc "${localPath}" -t plain 2>/dev/null`,
-          { timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
-        ).toString().trim();
+        // execFileSync avoids shell — args are passed directly to pandoc
+        const raw = execFileSync('pandoc', [localPath, '-t', 'plain'], {
+          timeout: 30_000,
+          maxBuffer: 10 * 1024 * 1024,
+        }).toString().trim();
+        if (!raw) throw new Error('empty output');
         const text = raw.length > MAX_TEXT_CHARS
           ? raw.slice(0, MAX_TEXT_CHARS) + '\n...(content truncated)'
           : raw;
@@ -84,17 +79,14 @@ function processAttachments(message: Message): string {
         );
       } catch {
         parts.push(
-          `[Attached PDF: ${filename} saved to ${localPath} — text extraction failed; ` +
-          `agents can process it directly with run_command("pandoc \\"${localPath}\\" ...")]`,
+          `[Attached PDF: ${filename} saved to ${localPath} — ` +
+          `text extraction failed; use fetch_url("${localPath}") or ask DevOps to process it]`,
         );
       }
 
     } else if (TEXT_EXTS.has(ext)) {
       try {
-        const raw = execSync(`cat "${localPath}"`, {
-          timeout: 10_000,
-          maxBuffer: 10 * 1024 * 1024,
-        }).toString();
+        const raw  = readFileSync(localPath, 'utf-8');
         const text = raw.length > MAX_TEXT_CHARS
           ? raw.slice(0, MAX_TEXT_CHARS) + '\n...(content truncated)'
           : raw;
@@ -160,10 +152,11 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
     }
   });
 
-  client.on(Events.MessageCreate, (message: Message) => {
+  // Async handler — safe in discord.js v14
+  client.on(Events.MessageCreate, async (message: Message) => {
     if (message.author.bot) return;
 
-    const botId      = client.user?.id ?? '';
+    const botId       = client.user?.id ?? '';
     const isMentioned = message.mentions.users.has(botId);
     const isTrigger   = TRIGGER.test(message.content.trim());
     if (!isMentioned && !isTrigger) return;
@@ -174,8 +167,8 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
       .replace(TRIGGER, '')
       .trim();
 
-    // Process attachments and append to content
-    const attachmentContent = processAttachments(message);
+    // Download and process attachments before handing off to NanoClaw
+    const attachmentContent = await processAttachments(message);
     if (attachmentContent) {
       content = content ? `${content}\n\n${attachmentContent}` : attachmentContent;
     }
@@ -184,13 +177,13 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
 
     const jid = message.channelId;
     const msg: NewMessage = {
-      id:           message.id,
-      chat_jid:     jid,
-      sender:       message.author.id,
-      sender_name:  message.author.username,
+      id:             message.id,
+      chat_jid:       jid,
+      sender:         message.author.id,
+      sender_name:    message.author.username,
       content,
-      timestamp:    message.createdAt.toISOString(),
-      is_from_me:   false,
+      timestamp:      message.createdAt.toISOString(),
+      is_from_me:     false,
       is_bot_message: false,
     };
 
@@ -210,7 +203,6 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
         console.error(`[discord] Channel not found: ${jid}`);
         return;
       }
-      // Discord message limit is 2000 chars; split if needed
       const chunks = text.match(/[\s\S]{1,1900}/g) ?? [text];
       for (const chunk of chunks) {
         await ch.send(chunk).catch((err) =>
@@ -219,13 +211,9 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
       }
     },
 
-    isConnected(): boolean {
-      return connected;
-    },
+    isConnected(): boolean { return connected; },
 
-    ownsJid(jid: string): boolean {
-      return jid === DISCORD_PM_CHANNEL_ID;
-    },
+    ownsJid(jid: string): boolean { return jid === DISCORD_PM_CHANNEL_ID; },
 
     async disconnect(): Promise<void> {
       client.destroy();

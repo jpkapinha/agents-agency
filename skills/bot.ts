@@ -559,11 +559,12 @@ async function dispatchPMTool(
       const hint    = (args['filename'] as string | undefined) ?? '';
       const UPLOAD_DIR = '/workspace/.agency/uploads';
 
-      // Convert Google Drive share links → direct download URL
+      // Convert Google Drive share links → direct download URL.
+      // confirm=t bypasses the "file too large to scan for viruses" warning page.
       let downloadUrl = rawUrl;
       const driveMatch = rawUrl.match(/drive\.google\.com\/file\/d\/([^/?]+)/);
       if (driveMatch) {
-        downloadUrl = `https://drive.google.com/uc?export=download&id=${driveMatch[1]}`;
+        downloadUrl = `https://drive.google.com/uc?export=download&confirm=t&id=${driveMatch[1]}`;
       }
 
       // Derive filename for local storage
