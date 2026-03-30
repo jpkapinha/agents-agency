@@ -32,6 +32,42 @@ const WORKSPACE             = '/workspace';
 
 if (!OPENROUTER_API_KEY) { console.error('[bot] OPENROUTER_API_KEY is not set'); process.exit(1); }
 
+// ---------------------------------------------------------------------------
+// Cost tracking
+// ---------------------------------------------------------------------------
+
+// Rough per-token pricing in USD (input / output per million tokens)
+const MODEL_PRICING: Record<string, [number, number]> = {
+  'moonshotai/kimi-k2.5':        [0.15,  0.60],
+  'anthropic/claude-sonnet-4-5': [3.00, 15.00],
+  'anthropic/claude-4.6-sonnet': [3.00, 15.00],
+  'anthropic/claude-opus-4-5':   [15.0, 75.00],
+  'anthropic/claude-4.6-opus':   [15.0, 75.00],
+};
+
+function estimateCost(model: string, prompt: number, completion: number): number {
+  const entry = Object.entries(MODEL_PRICING).find(([k]) => model.includes(k));
+  const [inputPer1M, outputPer1M] = entry ? entry[1] : [1.0, 5.0];
+  return (prompt / 1_000_000) * inputPer1M + (completion / 1_000_000) * outputPer1M;
+}
+
+function logCost(taskName: string, model: string, prompt: number, completion: number): void {
+  try {
+    mkdirSync(HISTORY_DIR, { recursive: true });
+    const costsFile = `${HISTORY_DIR}/costs.json`;
+    let costs: Array<{ ts: string; task: string; model: string; prompt: number; completion: number; usd: number }> = [];
+    try { costs = JSON.parse(readFileSync(costsFile, 'utf-8')); } catch { /* first run */ }
+    costs.push({ ts: new Date().toISOString(), task: taskName.slice(0, 80), model, prompt, completion, usd: estimateCost(model, prompt, completion) });
+    writeFileSync(costsFile, JSON.stringify(costs, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[bot] Failed to log cost:', err);
+  }
+}
+
+function formatCost(usd: number): string {
+  return usd < 0.01 ? '<$0.01' : `~$${usd.toFixed(2)}`;
+}
+
 const modelMap       = loadModelMap(MODELS_CONFIG);
 const PM_MODEL       = modelMap['project-manager'] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
 const externalAgents: ExternalAgentDef[] = loadExternalAgents(ROLES_DIR);
@@ -401,6 +437,15 @@ const CREATE_PRD_TOOL = {
   },
 };
 
+const GET_COSTS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'get_costs',
+    description: 'Get a summary of token usage and estimated costs for this project session. Use when the client asks about cost, budget, or spend.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -413,6 +458,7 @@ const PM_TOOLS = [
   ADD_REPO_TOOL,
   UPDATE_MEMORY_TOOL,
   CREATE_PRD_TOOL,
+  GET_COSTS_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -623,13 +669,19 @@ async function dispatchPMTool(
         (msg) => notifyUser(`⚙️ ${msg}`, send),
       );
 
+      // Track cost
+      const agentModel = modelMap[role] ?? modelMap['__default__'] ?? 'unknown';
+      const { prompt, completion } = result.tokensUsed;
+      logCost(taskPreview, agentModel, prompt, completion);
+      const costUsd = estimateCost(agentModel, prompt, completion);
+
       if (result.status === 'blocked') {
         updateTask(trackedTask.id, { status: 'blocked', result: result.blocker });
         await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`, send);
         return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
       }
 
-      await notifyUser(`✅ **${agentName}** — done`, send);
+      await notifyUser(`✅ **${agentName}** — done (${prompt + completion} tokens, ${formatCost(costUsd)})`, send);
 
       // Automatically run Tech Lead verification after builder roles complete
       const BUILDER_ROLES = ['solidity-dev', 'frontend-dev', 'backend-dev'];
@@ -823,6 +875,29 @@ async function dispatchPMTool(
       writeFileSync('/workspace/.agency/prd.md', prdContent, 'utf-8');
 
       return `PRD written to /workspace/.agency/prd.md (${prdContent.length} chars). Now call send_artifact with path=".agency/prd.md" and description "📋 PRD ready for review", then request_decision asking the client to review and type APPROVED before development begins.`;
+    }
+
+    case 'get_costs': {
+      try {
+        const costsFile = `${HISTORY_DIR}/costs.json`;
+        const costs = JSON.parse(readFileSync(costsFile, 'utf-8')) as Array<{
+          ts: string; task: string; model: string; prompt: number; completion: number; usd: number;
+        }>;
+        if (!costs.length) return 'No cost data recorded yet.';
+        const total = costs.reduce((sum, c) => sum + c.usd, 0);
+        const totalTokens = costs.reduce((sum, c) => sum + c.prompt + c.completion, 0);
+        const lines = [
+          `**Cost summary** (${costs.length} tasks, ${totalTokens.toLocaleString()} tokens total, **${formatCost(total)}** estimated):`,
+          '',
+          ...costs.slice(-10).map(c =>
+            `• ${c.task} — ${c.model.split('/').pop()} — ${(c.prompt + c.completion).toLocaleString()} tokens — ${formatCost(c.usd)}`
+          ),
+        ];
+        if (costs.length > 10) lines.push(`*(showing last 10 of ${costs.length} tasks)*`);
+        return lines.join('\n');
+      } catch {
+        return 'No cost data recorded yet.';
+      }
     }
 
     default:
