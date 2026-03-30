@@ -19,7 +19,7 @@ import {
   runExternalAgent,
   type ExternalAgentDef,
 } from './agents.js';
-import { formatStateForPM, addRepo } from './state.js';
+import { formatStateForPM, addRepo, updateMemory, getMemory } from './state.js';
 import { runCommand, readPdf } from './tools.js';
 
 const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
@@ -180,6 +180,7 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 9. Use \`send_artifact\` to deliver documents and files: architecture docs, audit reports, specs, PDFs. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents can push code and open PRs via: run_command("gh pr create ...").
 10. Use \`fetch_url\` whenever the client shares a link (Google Drive, Notion export, GitHub raw, etc.) BEFORE delegating — specialists cannot download URLs themselves. Fetch first, then pass the extracted content in the task description.
 11. Use \`read_pdf\` whenever the client attaches a PDF file directly. The message will include a path like \`/workspace/.agency/uploads/filename.pdf\` — call \`read_pdf\` with that path immediately to get the content, then proceed.
+12. Use \`update_memory\` to record tech stack choices, key decisions, and milestones as they happen. This persists across Docker restarts and sessions.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -329,6 +330,40 @@ const FETCH_URL_TOOL = {
   },
 };
 
+const UPDATE_MEMORY_TOOL = {
+  type: 'function',
+  function: {
+    name: 'update_memory',
+    description: 'Persist key project information to long-term memory — survives Docker restarts. Record tech stack choices, key architectural decisions, milestones reached, and out-of-scope items. Call this whenever a significant decision is made or a milestone is reached.',
+    parameters: {
+      type: 'object',
+      properties: {
+        techStack: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Technology choices to remember, e.g. ["Solidity 0.8.24", "Next.js 14", "wagmi v2"]',
+        },
+        keyDecisions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Architectural or product decisions, e.g. ["Using UUPS proxy for upgradability", "No gasless transactions in v1"]',
+        },
+        milestones: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Completed milestones with dates, e.g. ["PRD approved 2024-01-15", "Smart contracts audited"]',
+        },
+        outOfScope: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Features/items explicitly excluded from the project',
+        },
+      },
+      required: [],
+    },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -339,6 +374,7 @@ const PM_TOOLS = [
   GET_STATE_TOOL,
   SEND_ARTIFACT_TOOL,
   ADD_REPO_TOOL,
+  UPDATE_MEMORY_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -645,6 +681,17 @@ async function dispatchPMTool(
       }
       addRepo(url, name, branch);
       return `Cloned ${url} → ${localPath} (branch: ${branch}). Agents can now work in /workspace/${name}.`;
+    }
+
+    case 'update_memory': {
+      updateMemory({
+        techStack:    (args['techStack']    as string[] | undefined) ?? [],
+        keyDecisions: (args['keyDecisions'] as string[] | undefined) ?? [],
+        milestones:   (args['milestones']   as string[] | undefined) ?? [],
+        outOfScope:   (args['outOfScope']   as string[] | undefined) ?? [],
+      });
+      const mem = getMemory();
+      return `Memory updated. Current state — Tech stack: ${mem.techStack.join(', ') || 'none'} | Key decisions: ${mem.keyDecisions.length} recorded | Milestones: ${mem.milestones.length} recorded`;
     }
 
     default:
