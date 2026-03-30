@@ -248,6 +248,7 @@ interface ORToolCall {
 
 interface ORResponse {
   choices: Array<{ finish_reason: string; message: ORMessage }>;
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
 async function callOpenRouter(
@@ -276,6 +277,7 @@ export interface AgentResult {
   status: 'done' | 'blocked';
   output: string;
   blocker?: string;
+  tokensUsed: { prompt: number; completion: number };
 }
 
 export async function runAgent(
@@ -304,8 +306,15 @@ export async function runAgent(
 
   console.log(`[agent] ${agentDef.name} (${model}) starting — task: ${task.slice(0, 80)}...`);
 
+  let totalPrompt = 0;
+  let totalCompletion = 0;
+
   for (let round = 0; round < 20; round++) {
     const data = await callOpenRouter(model, messages, tools, apiKey);
+    if (data.usage) {
+      totalPrompt     += data.usage.prompt_tokens;
+      totalCompletion += data.usage.completion_tokens;
+    }
     const choice = data.choices[0];
     const msg = choice.message;
     messages.push(msg);
@@ -313,10 +322,10 @@ export async function runAgent(
     if (choice.finish_reason !== 'tool_calls' || !msg.tool_calls?.length) {
       const output = msg.content ?? '(no response)';
       if (output.startsWith('BLOCKED:')) {
-        return { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim() };
+        return { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim(), tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
       }
       console.log(`[agent] ${agentDef.name} done (${round + 1} rounds)`);
-      return { status: 'done', output };
+      return { status: 'done', output, tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
     }
 
     // Execute tool calls
@@ -357,7 +366,7 @@ export async function runAgent(
     }
   }
 
-  return { status: 'blocked', output: 'Max rounds reached without completing the task.', blocker: 'Exceeded 20 iterations' };
+  return { status: 'blocked', output: 'Max rounds reached without completing the task.', blocker: 'Exceeded 20 iterations', tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
 }
 
 // ---------------------------------------------------------------------------
