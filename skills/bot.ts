@@ -591,8 +591,41 @@ async function dispatchPMTool(
         return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
       }
 
-      updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 500) });
       await notifyUser(`✅ **${agentName}** — done`, send);
+
+      // Automatically run Tech Lead verification after builder roles complete
+      const BUILDER_ROLES = ['solidity-dev', 'frontend-dev', 'backend-dev'];
+      if (BUILDER_ROLES.includes(role)) {
+        await notifyUser(`🔍 **Tech Lead** — verifying tests…`, send);
+        const verifyTask = [
+          `Review the work just completed by ${agentName} and verify quality:`,
+          `Original task: ${taskPreview}`,
+          ``,
+          `Steps:`,
+          `1. Identify what was built (read relevant files in /workspace).`,
+          `2. Run the test suite: for Solidity use "forge test"; for Node.js use "npm test"; for TypeScript use "tsc --noEmit".`,
+          `3. If tests fail, list specific failures. If no test suite exists, flag it.`,
+          `4. Provide a brief quality verdict: PASS / FAIL / NEEDS-TESTS.`,
+          `Be concise. Do not rewrite code — only report findings.`,
+        ].join('\n');
+
+        const verifyResult = await runAgent(
+          'tech-lead',
+          verifyTask,
+          `Project: ${PROJECT_NAME}`,
+          modelMap,
+          OPENROUTER_API_KEY,
+          (msg) => notifyUser(`⚙️ ${msg}`, send),
+        );
+
+        const verdict = verifyResult.output.includes('FAIL') ? '⚠️' : '✅';
+        await notifyUser(`${verdict} **Tech Lead** — ${verifyResult.output.slice(0, 300)}`, send);
+
+        updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 300) + ' | Tests: ' + verifyResult.output.slice(0, 200) });
+        return `${agentName} output:\n${result.output}\n\n---\nTech Lead verification:\n${verifyResult.output}`;
+      }
+
+      updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 500) });
       return result.output;
     }
 
