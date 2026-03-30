@@ -80,11 +80,11 @@ log "Step 3/3 — Done."
 # ---------------------------------------------------------------------------
 log "Starting NanoClaw (Andy the Project Manager)..."
 
-# NanoClaw's DATA_DIR/STORE_DIR/GROUPS_DIR resolve relative to cwd.
-# Run from /app/nanoclaw so state lives in the container filesystem (writable
-# by agency regardless of host volume ownership).
-# bot.ts history and state.json go to /workspace/.agency (best-effort).
-mkdir -p /workspace/.agency 2>/dev/null || true
+# Ensure /workspace/.agency and uploads dir are writable by the agency user.
+# On Windows/Docker Desktop, volume mounts can land as root-owned — this fixes
+# any leftover root ownership so history, state, and uploads all work.
+mkdir -p /workspace/.agency/uploads 2>/dev/null || true
+chmod -R u+rwX /workspace/.agency 2>/dev/null || true
 cd /app/nanoclaw
 
 NANOCLAW_BIN="${APP_DIR}/nanoclaw/node_modules/.bin/tsx"
