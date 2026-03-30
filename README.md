@@ -131,6 +131,7 @@ In your Discord PM channel:
 | `GITHUB_ORG` | `jpkapinha` | Your GitHub org/username, used in log messages |
 | `COST_WARNING_THRESHOLD_USD` | `5` | Discord alert when session spend exceeds this amount |
 | `WEB3_SKILLS_REPO` | _(protofire private)_ | SSH URL for a private web3-skills repo (see [Private Skills](#optional-private-web3-skills)) |
+| `WEB3_SKILLS_BRANCH` | `main` | Branch to clone from the web3-skills repo |
 
 ---
 
@@ -222,14 +223,15 @@ Configure which model each role uses in `config/models.json`. No code changes ne
 
 | Role | Default Model | Reasoning |
 |---|---|---|
-| Project Manager | `anthropic/claude-opus-4-6` | High-reasoning, client-facing quality |
-| Solutions Architect | `anthropic/claude-opus-4-6` | Architecture decisions require deep thinking |
-| Risk Manager | `anthropic/claude-opus-4-6` | Security is high-stakes |
-| Tech Lead | `anthropic/claude-sonnet-4-6` | Code review and coordination |
-| Frontend Dev | `anthropic/claude-sonnet-4-6` | React/Next.js development |
-| Backend Dev | `anthropic/claude-sonnet-4-6` | APIs and services |
-| DevOps | `anthropic/claude-sonnet-4-6` | Infrastructure |
-| Solidity Dev | `anthropic/claude-sonnet-4-6` | Smart contract development |
+| Project Manager | `anthropic/claude-4.6-sonnet` | Client-facing orchestration |
+| Product Manager | `anthropic/claude-4.6-sonnet` | Requirements and roadmap |
+| Solutions Architect | `anthropic/claude-4.6-opus` | Architecture decisions require deep thinking |
+| Risk Manager | `anthropic/claude-4.6-opus` | Security is high-stakes |
+| Tech Lead | `anthropic/claude-4.6-sonnet` | Code review and coordination |
+| Frontend Dev | `anthropic/claude-4.6-sonnet` | React/Next.js development |
+| Backend Dev | `anthropic/claude-4.6-sonnet` | APIs and services |
+| DevOps | `anthropic/claude-4.6-sonnet` | Infrastructure |
+| Solidity Dev | `anthropic/claude-4.6-sonnet` | Smart contract development |
 
 All models route through [OpenRouter](https://openrouter.ai/) — one key, all providers.
 
@@ -338,7 +340,9 @@ To upgrade pinned versions, edit `versions.lock` and rebuild.
 
 ## Optional: Private Web3 Skills
 
-If you have a private skills repository (custom patterns, good practices, internal tooling), you can load it at startup via SSH deploy key:
+If you have a private patterns repository (good practices, coding standards, internal tooling docs), you can load it at startup via SSH deploy key.
+
+At startup, `load-web3-skills.sh` clones the repo and copies its `patterns/` subdirectory (or the full repo if no `patterns/` subdir exists) to `/app/patterns/` inside the container. All agents automatically receive a note about available patterns in their system prompt and can read them with `read_file("/app/patterns/<file>")` and `list_files("/app/patterns")`.
 
 ### 1. Generate a key pair
 
@@ -362,9 +366,10 @@ rm web3-skills-key web3-skills-key.pub
 
 ```env
 WEB3_SKILLS_REPO=git@github.com:yourorg/web3-skills.git
+WEB3_SKILLS_BRANCH=main   # optional, defaults to main
 ```
 
-The `secrets/` directory is gitignored — the key will never be committed.
+The `secrets/` directory is gitignored — the key will never be committed. The deploy key is also removed from the container filesystem after cloning (it remains accessible only via the Docker secret mount).
 
 ---
 
