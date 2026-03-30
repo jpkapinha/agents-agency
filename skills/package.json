@@ -1,0 +1,10 @@
+{
+  "name": "agents-agency-skills",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "tsx": "^4.19.2"
+  }
+}

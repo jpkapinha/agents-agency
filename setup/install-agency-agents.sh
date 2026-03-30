@@ -7,7 +7,7 @@ set -euo pipefail
 
 APP_DIR="/app"
 AGENCY_AGENTS_DIR="${APP_DIR}/agency-agents"
-NANOCLAW_ROLES_DIR="${APP_DIR}/nanoclaw/roles"
+NANOCLAW_ROLES_DIR="${APP_DIR}/roles"
 VERSIONS_LOCK="${APP_DIR}/versions.lock"
 
 log() { echo "[install-agency-agents] $*"; }
@@ -44,23 +44,16 @@ if [[ ! -d "${NANOCLAW_ROLES_DIR}" ]]; then
   mkdir -p "${NANOCLAW_ROLES_DIR}"
 fi
 
-# Copy role YAML/JSON definitions — NanoClaw picks them up at startup
-ROLES_SOURCE="${AGENCY_AGENTS_DIR}/roles"
-if [[ -d "${ROLES_SOURCE}" ]]; then
-  log "Merging role definitions from agency-agents/roles/ → nanoclaw/roles/..."
-  cp -r "${ROLES_SOURCE}/." "${NANOCLAW_ROLES_DIR}/"
-  log "Merged $(ls "${ROLES_SOURCE}" | wc -l | tr -d ' ') role file(s)."
-else
-  log "No roles/ directory found in agency-agents — skipping merge."
-fi
-
-# Copy any agent prompts
-PROMPTS_SOURCE="${AGENCY_AGENTS_DIR}/prompts"
-NANOCLAW_PROMPTS_DIR="${APP_DIR}/nanoclaw/prompts"
-if [[ -d "${PROMPTS_SOURCE}" ]]; then
-  log "Merging agent prompts..."
-  mkdir -p "${NANOCLAW_PROMPTS_DIR}"
-  cp -r "${PROMPTS_SOURCE}/." "${NANOCLAW_PROMPTS_DIR}/"
-fi
+# FIX: agency-agents organises roles in domain subdirectories (engineering/,
+#      design/, specialized/, etc.), not a single roles/ directory.
+#      Find all .md files recursively and copy them flat into nanoclaw/roles/.
+log "Merging role definitions from agency-agents → nanoclaw/roles/..."
+MERGED=0
+while IFS= read -r -d '' f; do
+  dest="${NANOCLAW_ROLES_DIR}/$(basename "$f")"
+  cp "$f" "$dest"
+  MERGED=$((MERGED + 1))
+done < <(find "${AGENCY_AGENTS_DIR}" -name "*.md" -not -name "README.md" -print0)
+log "Merged ${MERGED} role file(s)."
 
 log "agency-agents installation complete."

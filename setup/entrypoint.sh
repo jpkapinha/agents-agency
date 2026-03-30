@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # entrypoint.sh — NanoClaw Web3 Agency bootstrap
-# Orchestrates all setup steps then hands off to the NanoClaw process.
+# Orchestrates all setup steps then hands off to NanoClaw.
 # =============================================================================
 set -euo pipefail
 
@@ -16,7 +16,8 @@ warn() { echo "[agency] $(date -u +%H:%M:%SZ)  WARN  $*" >&2; }
 die()  { echo "[agency] $(date -u +%H:%M:%SZ)  ERROR $*" >&2; exit 1; }
 
 log "========================================================="
-log "  Protofire NanoClaw Web3 Agency — starting up"
+log "  agents-agency — Andy the Project Manager"
+log "  Powered by NanoClaw"
 log "  Project: ${PROJECT_NAME:-unknown}"
 log "========================================================="
 
@@ -37,6 +38,19 @@ for var in "${REQUIRED_VARS[@]}"; do
 done
 
 log "Environment validation passed."
+
+# ---------------------------------------------------------------------------
+# GitHub credentials — configure git + gh CLI if GITHUB_TOKEN is set
+# ---------------------------------------------------------------------------
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  log "Configuring GitHub credentials..."
+  git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+  echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null \
+    || warn "gh auth login failed — gh CLI may not work correctly."
+  log "GitHub credentials configured (git + gh CLI)."
+else
+  warn "GITHUB_TOKEN not set — private repo clones and PR creation will not work."
+fi
 
 # ---------------------------------------------------------------------------
 # Step 1: Install / update agency-agents role definitions
@@ -60,35 +74,31 @@ log "Step 3/3 — Configuring Project Manager Discord integration..."
 log "Step 3/3 — Done."
 
 # ---------------------------------------------------------------------------
-# Apply model routing from config/models.json
+# Launch NanoClaw
+# NanoClaw's DATA_DIR, GROUPS_DIR, and STORE_DIR are relative to cwd.
+# We run from /workspace/.agency so all state persists across restarts.
 # ---------------------------------------------------------------------------
-log "Applying model routing from /app/config/models.json..."
-if [[ -f "${APP_DIR}/nanoclaw/dist/configure-models.js" ]]; then
-  node "${APP_DIR}/nanoclaw/dist/configure-models.js" \
-    --config "${APP_DIR}/config/models.json" \
-    || warn "Model configuration step returned non-zero — continuing anyway."
-fi
+log "Starting NanoClaw (Andy the Project Manager)..."
 
-# ---------------------------------------------------------------------------
-# Register cost-tracking skill
-# ---------------------------------------------------------------------------
-log "Registering cost-tracking skill..."
-if [[ -f "${APP_DIR}/skills/track-cost.ts" ]]; then
-  ts-node "${APP_DIR}/skills/track-cost.ts" --register \
-    || warn "Cost tracking skill registration failed — continuing without it."
-fi
+mkdir -p /workspace/.agency
+cd /workspace/.agency
 
-# ---------------------------------------------------------------------------
-# Launch NanoClaw agency
-# ---------------------------------------------------------------------------
-log "Starting NanoClaw agency process..."
-NANOCLAW_ENTRYPOINT="${APP_DIR}/nanoclaw/dist/index.js"
+NANOCLAW_BIN="${APP_DIR}/nanoclaw/node_modules/.bin/tsx"
+NANOCLAW_SRC="${APP_DIR}/nanoclaw/src/index.ts"
 
-if [[ ! -f "${NANOCLAW_ENTRYPOINT}" ]]; then
-  die "NanoClaw entrypoint not found at ${NANOCLAW_ENTRYPOINT}. Was the image built correctly?"
-fi
+_shutdown() {
+  log "Shutdown signal received — stopping NanoClaw PID ${BOT_PID}"
+  kill -TERM "${BOT_PID}" 2>/dev/null
+  wait "${BOT_PID}"
+  exit 0
+}
 
-exec node "${NANOCLAW_ENTRYPOINT}" \
-  --config "${APP_DIR}/config/models.json" \
-  --workspace /workspace \
-  --project "${PROJECT_NAME:-unnamed}"
+"${NANOCLAW_BIN}" "${NANOCLAW_SRC}" &
+BOT_PID=$!
+log "NanoClaw PID: ${BOT_PID}"
+trap '_shutdown' TERM INT
+
+wait ${BOT_PID}
+EXIT_CODE=$?
+log "NanoClaw exited with code: ${EXIT_CODE}"
+exit ${EXIT_CODE}
