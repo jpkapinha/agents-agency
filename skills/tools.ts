@@ -5,7 +5,7 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { resolve, dirname, relative } from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 
 const WORKSPACE = '/workspace';
 export const PATTERNS_DIR = '/app/patterns';
@@ -142,6 +142,33 @@ export function runCommand(cmd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Command
   }
 }
 
+export function readPdf(filePath: string): { content: string; truncated: boolean } {
+  // Allow reads from workspace and uploads dir
+  const abs = resolve(WORKSPACE, filePath);
+  const UPLOADS = `${WORKSPACE}/.agency/uploads`;
+  const allowed =
+    abs.startsWith(WORKSPACE + '/') ||
+    abs.startsWith(UPLOADS + '/') ||
+    abs === WORKSPACE;
+  if (!allowed) throw new Error(`Path traversal denied: ${filePath}`);
+
+  try {
+    const raw = execFileSync('pandoc', [abs, '-t', 'plain'], {
+      timeout: 60_000,
+      maxBuffer: 20 * 1024 * 1024,
+    }).toString().trim();
+
+    if (!raw) return { content: '(PDF produced no extractable text — may be scanned/image-only)', truncated: false };
+    if (raw.length > MAX_FILE_CHARS) {
+      return { content: raw.slice(0, MAX_FILE_CHARS), truncated: true };
+    }
+    return { content: raw, truncated: false };
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? String(err);
+    return { content: `PDF extraction failed: ${msg}`, truncated: false };
+  }
+}
+
 export function gitStatus(): CommandResult {
   return runCommand('git status --short', 10_000);
 }
@@ -164,11 +191,26 @@ export function gitCommit(message: string): CommandResult {
 // ---------------------------------------------------------------------------
 
 export const TOOL_SCHEMAS: Record<string, object> = {
+  read_pdf: {
+    type: 'function',
+    function: {
+      name: 'read_pdf',
+      description: 'Extract and return the text content of a PDF file. Accepts paths relative to /workspace or absolute paths under /workspace/.agency/uploads/. More efficient than read_file for PDFs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path to the PDF, e.g. ".agency/uploads/report.pdf" or "docs/spec.pdf"' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+
   read_file: {
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read a file from the workspace. Returns content (capped at 50K chars).',
+      description: 'Read a text file from the workspace. Returns content (capped at 50K chars). Use read_pdf for PDF files.',
       parameters: {
         type: 'object',
         properties: {
@@ -266,6 +308,12 @@ export const TOOL_SCHEMAS: Record<string, object> = {
 
 export function executeTool(name: string, args: Record<string, unknown>): string {
   switch (name) {
+    case 'read_pdf': {
+      const result = readPdf(args['path'] as string);
+      return result.truncated
+        ? `${result.content}\n\n[truncated at 50K chars]`
+        : result.content;
+    }
     case 'read_file': {
       const result = readFile(args['path'] as string);
       return result.truncated

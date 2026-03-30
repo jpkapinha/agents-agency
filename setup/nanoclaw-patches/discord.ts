@@ -14,24 +14,21 @@ import {
   Message,
   TextChannel,
 } from 'discord.js';
-import { execFileSync } from 'child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import { Channel, NewMessage } from '../types.js';
 import { ChannelOpts, registerChannel } from './registry.js';
 
 const DISCORD_BOT_TOKEN     = process.env['DISCORD_BOT_TOKEN']     ?? '';
 const DISCORD_PM_CHANNEL_ID = process.env['DISCORD_PM_CHANNEL_ID'] ?? '';
 const UPLOAD_DIR            = '/workspace/.agency/uploads';
-const MAX_TEXT_CHARS        = 60_000;
 
 const TRIGGER    = /^@andy\b/i;
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
-const TEXT_EXTS  = new Set(['md', 'txt', 'json', 'yaml', 'yml', 'ts', 'js',
-                             'sol', 'csv', 'toml', 'env', 'sh', 'py', 'rs',
-                             'go', 'java', 'html', 'css', 'xml', 'sql']);
 
 // ---------------------------------------------------------------------------
-// Attachment processing — async, uses Node fetch (no shell escaping issues)
+// Attachment processing — download only, no upfront text extraction.
+// PDFs are saved and the path is reported so agents can call read_pdf()
+// on demand, avoiding wasteful upfront token injection.
 // ---------------------------------------------------------------------------
 
 async function processAttachments(message: Message): Promise<string> {
@@ -42,18 +39,16 @@ async function processAttachments(message: Message): Promise<string> {
   const parts: string[] = [];
 
   for (const [, att] of message.attachments) {
-    const url      = att.url;
-    const filename = att.name ?? 'attachment';
-    const ext      = filename.split('.').pop()?.toLowerCase() ?? '';
+    const url       = att.url;
+    const filename  = att.name ?? 'attachment';
+    const ext       = filename.split('.').pop()?.toLowerCase() ?? '';
     const localPath = `${UPLOAD_DIR}/${Date.now()}-${filename}`;
 
-    // Download using Node.js fetch — avoids all shell-escaping issues with
-    // Discord CDN signed URLs (ex=, is=, hm= params)
+    // Download via Node fetch — no shell escaping issues with signed CDN URLs
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      const buf = Buffer.from(await res.arrayBuffer());
-      writeFileSync(localPath, buf);
+      writeFileSync(localPath, Buffer.from(await res.arrayBuffer()));
     } catch (err) {
       parts.push(`[Attachment: ${filename} — download failed: ${err}]`);
       continue;
@@ -62,43 +57,11 @@ async function processAttachments(message: Message): Promise<string> {
     if (IMAGE_EXTS.has(ext)) {
       // Vision: pass URL marker → bot.ts converts to multimodal content block
       parts.push(`[IMAGE_URL:${url}]`);
-
     } else if (ext === 'pdf') {
-      try {
-        // execFileSync avoids shell — args are passed directly to pandoc
-        const raw = execFileSync('pandoc', [localPath, '-t', 'plain'], {
-          timeout: 30_000,
-          maxBuffer: 10 * 1024 * 1024,
-        }).toString().trim();
-        if (!raw) throw new Error('empty output');
-        const text = raw.length > MAX_TEXT_CHARS
-          ? raw.slice(0, MAX_TEXT_CHARS) + '\n...(content truncated)'
-          : raw;
-        parts.push(
-          `--- Attached PDF: ${filename} (saved to ${localPath}) ---\n${text}\n--- End of PDF ---`,
-        );
-      } catch {
-        parts.push(
-          `[Attached PDF: ${filename} saved to ${localPath} — ` +
-          `text extraction failed; use fetch_url("${localPath}") or ask DevOps to process it]`,
-        );
-      }
-
-    } else if (TEXT_EXTS.has(ext)) {
-      try {
-        const raw  = readFileSync(localPath, 'utf-8');
-        const text = raw.length > MAX_TEXT_CHARS
-          ? raw.slice(0, MAX_TEXT_CHARS) + '\n...(content truncated)'
-          : raw;
-        parts.push(
-          `--- Attached file: ${filename} (saved to ${localPath}) ---\n${text}\n--- End of file ---`,
-        );
-      } catch {
-        parts.push(`[Attached file: ${filename} saved to ${localPath}]`);
-      }
-
+      // Report path only — agents call read_pdf(".agency/uploads/...") on demand
+      parts.push(`[PDF attached: "${filename}" saved to ${localPath} — use read_pdf("${localPath}") to read it]`);
     } else {
-      parts.push(`[Attached file: ${filename} saved to ${localPath}]`);
+      parts.push(`[File attached: "${filename}" saved to ${localPath} — use read_file("${localPath}") to read it]`);
     }
   }
 

@@ -116,13 +116,13 @@ If you are blocked, reply with: BLOCKED: <reason>`,
 // ---------------------------------------------------------------------------
 
 const ROLE_TOOLS: Record<string, string[]> = {
-  'solidity-dev':        ['read_file', 'write_file', 'list_files', 'run_command'],
-  'frontend-dev':        ['read_file', 'write_file', 'list_files', 'run_command'],
-  'backend-dev':         ['read_file', 'write_file', 'list_files', 'run_command'],
-  'devops':              ['read_file', 'write_file', 'list_files', 'run_command', 'git_status', 'git_diff', 'git_commit'],
-  'tech-lead':           ['read_file', 'list_files'],
-  'solutions-architect': ['read_file', 'write_file', 'list_files'],
-  'risk-manager':        ['read_file', 'list_files'],
+  'solidity-dev':        ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
+  'frontend-dev':        ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
+  'backend-dev':         ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
+  'devops':              ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command', 'git_status', 'git_diff', 'git_commit'],
+  'tech-lead':           ['read_pdf', 'read_file', 'list_files'],
+  'solutions-architect': ['read_pdf', 'read_file', 'write_file', 'list_files'],
+  'risk-manager':        ['read_pdf', 'read_file', 'list_files'],
 };
 
 function getToolSchemas(role: string, task: string): object[] {
