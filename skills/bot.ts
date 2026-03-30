@@ -21,6 +21,7 @@ import {
 } from './agents.js';
 import { formatStateForPM, addRepo, updateMemory, getMemory, addTask, updateTask } from './state.js';
 import { runCommand, readPdf } from './tools.js';
+import { channelSend } from './channel-send.js';
 
 const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
 const PROJECT_NAME          = process.env.PROJECT_NAME          || 'Web3 Project';
@@ -66,6 +67,37 @@ function logCost(taskName: string, model: string, prompt: number, completion: nu
 
 function formatCost(usd: number): string {
   return usd < 0.01 ? '<$0.01' : `~$${usd.toFixed(2)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Background task pool
+// Agents run detached from the PM's AbortSignal so the user can keep
+// chatting while work happens in the background.
+// ---------------------------------------------------------------------------
+
+interface BgTask {
+  id: string;
+  agentName: string;
+  taskPreview: string;
+  startedAt: Date;
+  promise: Promise<void>;
+}
+
+const bgPool = new Map<string, BgTask[]>();
+
+function bgAdd(channelId: string, task: BgTask): void {
+  const list = bgPool.get(channelId) ?? [];
+  list.push(task);
+  bgPool.set(channelId, list);
+}
+
+function bgRemove(channelId: string, id: string): void {
+  const list = bgPool.get(channelId) ?? [];
+  bgPool.set(channelId, list.filter(t => t.id !== id));
+}
+
+function bgList(channelId: string): BgTask[] {
+  return bgPool.get(channelId) ?? [];
 }
 
 const modelMap       = loadModelMap(MODELS_CONFIG);
@@ -205,10 +237,10 @@ ${AGENTS.map(a => `- **${a.name}** (${a.role}): ${a.description}`).join('\n')}
 You can hire any of ${externalAgents.length} additional specialists — UX designers, legal advisors, data scientists, technical writers, marketing strategists, and many more. Describe the expertise you need in natural language.
 
 **How to work:**
-1. For significant tasks: call \`send_update\` immediately with a brief plan ("On it — involving Solidity Dev and Risk Manager"), then proceed.
-2. Delegate to specialists using \`consult_agent\` (core team) or \`hire_specialist\` (external roster). Multiple calls run in parallel.
-3. Specialists can read/write files and run commands in /workspace — they will iterate until done.
-4. Use \`send_update\` at major milestones: when a specialist finishes, when tests pass, when blocked. Not after every tool call.
+1. For significant tasks: call \`send_update\` immediately with a brief plan ("On it — involving Solidity Dev and Risk Manager"), then dispatch agents. You remain available for questions while they work.
+2. Delegate to specialists using \`consult_agent\` (core team) or \`hire_specialist\` (external roster). **Agents run in the background** — \`consult_agent\` returns immediately and you do NOT wait for them. The client can keep chatting with you while work happens.
+3. Specialists can read/write files and run commands in /workspace — they will iterate until done and post their own completion messages.
+4. Use \`send_update\` for your own progress commentary. Specialists post their own ✅/⚠️ messages when they finish.
 5. Use \`request_decision\` when: at an architectural fork where client preference matters, before committing/deploying, or when genuinely blocked. Do NOT ask for decisions you can resolve with good engineering judgment.
 6. Use \`get_state\` at the start of a new task to check what's already been done.
 7. Answer simple questions (greetings, status, clarifications) directly — no need to call agents.
@@ -218,6 +250,8 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 11. Use \`read_pdf\` whenever the client attaches a PDF file directly. The message will include a path like \`/workspace/.agency/uploads/filename.pdf\` — call \`read_pdf\` with that path immediately to get the content, then proceed.
 12. Use \`update_memory\` to record tech stack choices, key decisions, and milestones as they happen. This persists across Docker restarts and sessions.
 13. Use \`create_prd\` BEFORE dispatching ANY development work. When the client describes requirements, call \`create_prd\` first to structure them into a PRD, then \`send_artifact\` the PRD (".agency/prd.md"), then \`request_decision\` asking the client to review and type APPROVED. Only dispatch dev agents after receiving APPROVED.
+14. Use \`get_running_tasks\` when the client asks how things are going — it shows which agents are active and how long they've been running.
+15. Use \`wait_for_tasks\` when the NEXT step truly depends on the output of a currently running task (e.g. "audit the contract once it's written"). Otherwise, just dispatch and move on.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -446,6 +480,24 @@ const GET_COSTS_TOOL = {
   },
 };
 
+const GET_RUNNING_TASKS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'get_running_tasks',
+    description: 'Check which specialist agents are currently working in the background. Use when the client asks "how is it going?", "what is happening?", or "are you still working on it?".',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
+const WAIT_FOR_TASKS_TOOL = {
+  type: 'function',
+  function: {
+    name: 'wait_for_tasks',
+    description: 'Wait for all currently running background agents to finish before proceeding. Use this when the next step depends on the output of a currently running task (e.g. "audit the contract once Solidity Dev finishes writing it").',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -459,6 +511,8 @@ const PM_TOOLS = [
   UPDATE_MEMORY_TOOL,
   CREATE_PRD_TOOL,
   GET_COSTS_TOOL,
+  GET_RUNNING_TASKS_TOOL,
+  WAIT_FOR_TASKS_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -655,68 +709,89 @@ async function dispatchPMTool(
       const agentName = agentDef?.name ?? role;
       const taskPreview = task.length > 120 ? task.slice(0, 120) + '…' : task;
 
-      // Register task in project state before starting
+      // Register in project state
       const trackedTask = addTask(taskPreview, role);
       updateTask(trackedTask.id, { status: 'in-progress' });
 
+      // Announce immediately — agent starts in background
       await notifyUser(`🔧 **${agentName}** — ${taskPreview}`, send);
-      const result = await runAgent(
-        role,
-        task,
-        `Project: ${PROJECT_NAME}`,
-        modelMap,
-        OPENROUTER_API_KEY,
-        (msg) => notifyUser(`⚙️ ${msg}`, send),
-      );
 
-      // Track cost
-      const agentModel = modelMap[role] ?? modelMap['__default__'] ?? 'unknown';
-      const { prompt, completion } = result.tokensUsed;
-      logCost(taskPreview, agentModel, prompt, completion);
-      const costUsd = estimateCost(agentModel, prompt, completion);
+      // bg() always uses channelSend so it can post to Discord even after
+      // the PM loop finishes or is aborted by a new incoming message.
+      const bg = (text: string) => channelSend(channelId, text).catch(() => {});
 
-      if (result.status === 'blocked') {
-        updateTask(trackedTask.id, { status: 'blocked', result: result.blocker });
-        await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`, send);
-        return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
-      }
+      const promise = (async () => {
+        try {
+          const result = await runAgent(
+            role,
+            task,
+            `Project: ${PROJECT_NAME}`,
+            modelMap,
+            OPENROUTER_API_KEY,
+            (msg) => bg(`⚙️ ${msg}`),
+          );
 
-      await notifyUser(`✅ **${agentName}** — done (${prompt + completion} tokens, ${formatCost(costUsd)})`, send);
+          // Cost tracking
+          const agentModel = modelMap[role] ?? modelMap['__default__'] ?? 'unknown';
+          const { prompt, completion } = result.tokensUsed;
+          logCost(taskPreview, agentModel, prompt, completion);
+          const costUsd = estimateCost(agentModel, prompt, completion);
 
-      // Automatically run Tech Lead verification after builder roles complete
-      const BUILDER_ROLES = ['solidity-dev', 'frontend-dev', 'backend-dev'];
-      if (BUILDER_ROLES.includes(role)) {
-        await notifyUser(`🔍 **Tech Lead** — verifying tests…`, send);
-        const verifyTask = [
-          `Review the work just completed by ${agentName} and verify quality:`,
-          `Original task: ${taskPreview}`,
-          ``,
-          `Steps:`,
-          `1. Identify what was built (read relevant files in /workspace).`,
-          `2. Run the test suite: for Solidity use "forge test"; for Node.js use "npm test"; for TypeScript use "tsc --noEmit".`,
-          `3. If tests fail, list specific failures. If no test suite exists, flag it.`,
-          `4. Provide a brief quality verdict: PASS / FAIL / NEEDS-TESTS.`,
-          `Be concise. Do not rewrite code — only report findings.`,
-        ].join('\n');
+          if (result.status === 'blocked') {
+            updateTask(trackedTask.id, { status: 'blocked', result: result.blocker });
+            await bg(`⚠️ **${agentName}** is blocked: ${result.blocker}`);
+            return;
+          }
 
-        const verifyResult = await runAgent(
-          'tech-lead',
-          verifyTask,
-          `Project: ${PROJECT_NAME}`,
-          modelMap,
-          OPENROUTER_API_KEY,
-          (msg) => notifyUser(`⚙️ ${msg}`, send),
-        );
+          await bg(`✅ **${agentName}** — done (${prompt + completion} tokens, ${formatCost(costUsd)})`);
 
-        const verdict = verifyResult.output.includes('FAIL') ? '⚠️' : '✅';
-        await notifyUser(`${verdict} **Tech Lead** — ${verifyResult.output.slice(0, 300)}`, send);
+          // Automated test gate for builder roles
+          const BUILDER_ROLES = ['solidity-dev', 'frontend-dev', 'backend-dev'];
+          if (BUILDER_ROLES.includes(role)) {
+            await bg(`🔍 **Tech Lead** — verifying tests…`);
+            const verifyTask = [
+              `Review the work just completed by ${agentName} and verify quality:`,
+              `Original task: ${taskPreview}`,
+              ``,
+              `Steps:`,
+              `1. Identify what was built (read relevant files in /workspace).`,
+              `2. Run the test suite: for Solidity use "forge test"; for Node.js use "npm test"; for TypeScript use "tsc --noEmit".`,
+              `3. If tests fail, list specific failures. If no test suite exists, flag it.`,
+              `4. Provide a brief quality verdict: PASS / FAIL / NEEDS-TESTS.`,
+              `Be concise. Do not rewrite code — only report findings.`,
+            ].join('\n');
 
-        updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 300) + ' | Tests: ' + verifyResult.output.slice(0, 200) });
-        return `${agentName} output:\n${result.output}\n\n---\nTech Lead verification:\n${verifyResult.output}`;
-      }
+            const verifyResult = await runAgent(
+              'tech-lead',
+              verifyTask,
+              `Project: ${PROJECT_NAME}`,
+              modelMap,
+              OPENROUTER_API_KEY,
+              (msg) => bg(`⚙️ ${msg}`),
+            );
 
-      updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 500) });
-      return result.output;
+            const verdict = verifyResult.output.includes('FAIL') ? '⚠️' : '✅';
+            await bg(`${verdict} **Tech Lead** — ${verifyResult.output.slice(0, 300)}`);
+            updateTask(trackedTask.id, {
+              status: 'done',
+              result: result.output.slice(0, 300) + ' | Tests: ' + verifyResult.output.slice(0, 200),
+            });
+          } else {
+            updateTask(trackedTask.id, { status: 'done', result: result.output.slice(0, 500) });
+          }
+        } catch (err) {
+          await bg(`❌ **${agentName}** — unexpected error: ${(err as Error).message}`);
+          updateTask(trackedTask.id, { status: 'blocked', result: (err as Error).message });
+        } finally {
+          bgRemove(channelId, trackedTask.id);
+        }
+      })();
+
+      // Register so wait_for_tasks can await it
+      bgAdd(channelId, { id: trackedTask.id, agentName, taskPreview, startedAt: new Date(), promise });
+
+      // Return immediately — PM loop is unblocked
+      return `**${agentName}** is working on it in the background. I'll post updates as they come in. You can keep talking to me.`;
     }
 
     case 'hire_specialist': {
@@ -898,6 +973,27 @@ async function dispatchPMTool(
       } catch {
         return 'No cost data recorded yet.';
       }
+    }
+
+    case 'get_running_tasks': {
+      const tasks = bgList(channelId);
+      if (!tasks.length) return 'No agents are currently running in the background.';
+      const now = Date.now();
+      return tasks.map(t => {
+        const elapsed = Math.round((now - t.startedAt.getTime()) / 1000);
+        const mins = Math.floor(elapsed / 60);
+        const secs = elapsed % 60;
+        const time = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+        return `• **${t.agentName}** — ${t.taskPreview.slice(0, 80)} (running for ${time})`;
+      }).join('\n');
+    }
+
+    case 'wait_for_tasks': {
+      const tasks = bgList(channelId);
+      if (!tasks.length) return 'No background tasks running — ready to proceed.';
+      await notifyUser(`⏳ Waiting for ${tasks.length} background task(s) to complete…`, send);
+      await Promise.allSettled(tasks.map(t => t.promise));
+      return 'All background tasks completed. Ready to proceed.';
     }
 
     default:

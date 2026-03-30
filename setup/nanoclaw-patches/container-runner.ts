@@ -7,6 +7,7 @@
  */
 import { ChildProcess } from 'child_process';
 import { handleMessage, resolveDecision } from './skills/bot.js';
+import { registerChannelSend } from './skills/channel-send.js';
 import { RegisteredGroup } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -56,18 +57,24 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const { chatJid, prompt } = input;
 
-  // Interrupt any in-progress execution for this channel (pivot support)
+  // Interrupt any in-progress PM loop for this channel (pivot support).
+  // Background agent tasks are NOT aborted — they run to completion regardless.
   const prev = activeControllers.get(chatJid);
   if (prev) prev.abort();
 
   const ctrl = new AbortController();
   activeControllers.set(chatJid, ctrl);
 
-  // stream text back through NanoClaw → channel.sendMessage → Discord
+  // PM loop send — gated on abort so the PM stops talking after being interrupted.
   const send = async (text: string): Promise<void> => {
     if (ctrl.signal.aborted) return;
     await onOutput?.({ status: 'success', result: text });
   };
+
+  // Persistent channel send — NOT gated on abort.
+  // Background agent tasks use this via channelSend() in bot.ts so they can
+  // post progress/completion updates even after the PM loop has been aborted.
+  registerChannelSend(chatJid, (text: string) => sendTextToDiscord(chatJid, text));
 
   // upload a file attachment via Discord REST API directly
   const sendFile = async (filePath: string, description: string): Promise<void> => {
@@ -94,8 +101,22 @@ export async function runContainerAgent(
 }
 
 // ---------------------------------------------------------------------------
-// File upload via Discord REST API (used by send_artifact PM tool)
+// Discord REST API helpers — used for persistent sends and file uploads
 // ---------------------------------------------------------------------------
+
+/** Send a text message directly to a Discord channel via REST API. */
+async function sendTextToDiscord(channelId: string, text: string): Promise<void> {
+  const token = process.env['DISCORD_BOT_TOKEN'];
+  if (!token || !channelId) return;
+  const chunks = text.match(/[\s\S]{1,1900}/g) ?? [text];
+  for (const chunk of chunks) {
+    await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bot ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: chunk }),
+    }).catch((err) => console.error('[container-runner] sendText error:', err));
+  }
+}
 
 async function uploadFileToDiscord(
   channelId: string,
