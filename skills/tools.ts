@@ -143,8 +143,8 @@ export function runCommand(cmd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Command
 }
 
 export function readPdf(filePath: string): { content: string; truncated: boolean } {
-  // Allow reads from workspace and uploads dir
-  const abs = resolve(WORKSPACE, filePath);
+  // Allow absolute paths under /workspace or relative paths resolved to it
+  const abs = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath);
   const UPLOADS = `${WORKSPACE}/.agency/uploads`;
   const allowed =
     abs.startsWith(WORKSPACE + '/') ||
@@ -153,12 +153,14 @@ export function readPdf(filePath: string): { content: string; truncated: boolean
   if (!allowed) throw new Error(`Path traversal denied: ${filePath}`);
 
   try {
-    const raw = execFileSync('pandoc', [abs, '-t', 'plain'], {
+    // pdftotext (poppler-utils) — purpose-built for PDF text extraction.
+    // "-" as output writes to stdout.
+    const raw = execFileSync('pdftotext', [abs, '-'], {
       timeout: 60_000,
       maxBuffer: 20 * 1024 * 1024,
     }).toString().trim();
 
-    if (!raw) return { content: '(PDF produced no extractable text — may be scanned/image-only)', truncated: false };
+    if (!raw) return { content: '(PDF produced no extractable text — may be a scanned/image-only PDF)', truncated: false };
     if (raw.length > MAX_FILE_CHARS) {
       return { content: raw.slice(0, MAX_FILE_CHARS), truncated: true };
     }
