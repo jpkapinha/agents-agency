@@ -1,15 +1,15 @@
 {
   "roles": {
-    "project-manager": "openrouter/anthropic/claude-4.6-sonnet",
-    "product-manager": "openrouter/anthropic/claude-4.6-sonnet",
+    "project-manager": "openrouter/moonshotai/kimi-k2.5",
+    "product-manager": "openrouter/moonshotai/kimi-k2.5",
     "tech-lead": "openrouter/anthropic/claude-4.6-sonnet",
     "solutions-architect": "openrouter/anthropic/claude-4.6-opus",
-    "frontend-dev": "openrouter/anthropic/claude-4.6-sonnet",
+    "frontend-dev": "openrouter/moonshotai/kimi-k2.5",
     "backend-dev": "openrouter/anthropic/claude-4.6-sonnet",
     "solidity-dev": "openrouter/anthropic/claude-4.6-sonnet",
-    "devops": "openrouter/anthropic/claude-4.6-sonnet",
+    "devops": "openrouter/moonshotai/kimi-k2.5",
     "risk-manager": "openrouter/anthropic/claude-4.6-opus"
   },
-  "default": "openrouter/anthropic/claude-4.6-sonnet",
+  "default": "openrouter/moonshotai/kimi-k2.5",
   "cost-warning-threshold-usd": 5
 }
