@@ -44,9 +44,14 @@ console.log(`[bot] External roster: ${externalAgents.length} specialists availab
 // OpenRouter types
 // ---------------------------------------------------------------------------
 
+// Multimodal content blocks (text + vision)
+type TextBlock      = { type: 'text'; text: string };
+type ImageBlock     = { type: 'image_url'; image_url: { url: string } };
+type ContentBlock   = TextBlock | ImageBlock;
+
 interface ORMessage {
   role: string;
-  content: string | null;
+  content: string | ContentBlock[] | null;
   tool_calls?: ORToolCall[];
   tool_call_id?: string;
 }
@@ -59,6 +64,35 @@ interface ORToolCall {
 
 interface ORResponse {
   choices: Array<{ finish_reason: string; message: ORMessage }>;
+}
+
+// ---------------------------------------------------------------------------
+// Multimodal content conversion
+// Parses [IMAGE_URL:url] markers injected by discord.ts and converts the
+// message to an array of content blocks for OpenRouter's vision API.
+// ---------------------------------------------------------------------------
+
+const IMAGE_URL_RE = /\[IMAGE_URL:([^\]]+)\]/g;
+
+function toMultimodalContent(text: string): string | ContentBlock[] {
+  if (!IMAGE_URL_RE.test(text)) return text;
+  IMAGE_URL_RE.lastIndex = 0; // reset after .test()
+
+  const blocks: ContentBlock[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = IMAGE_URL_RE.exec(text)) !== null) {
+    const before = text.slice(lastIndex, match.index);
+    if (before.trim()) blocks.push({ type: 'text', text: before.trim() });
+    blocks.push({ type: 'image_url', image_url: { url: match[1] } });
+    lastIndex = match.index + match[0].length;
+  }
+
+  const after = text.slice(lastIndex).trim();
+  if (after) blocks.push({ type: 'text', text: after });
+
+  return blocks.length ? blocks : text;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +387,8 @@ async function runPMAsync(
     }
   }
   const history = histories[channelId];
-  history.push({ role: 'user', content: userMessage });
+  // Convert to multimodal content if message contains image URL markers
+  history.push({ role: 'user', content: toMultimodalContent(userMessage) });
 
   for (let round = 0; round < 15; round++) {
     if (signal.aborted) return;
