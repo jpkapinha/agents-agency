@@ -4,9 +4,27 @@
  * Core team agents run in agentic loops (up to 20 rounds) with file/exec tools.
  * External agents (from agency-agents roster) run as single-turn consultants.
  */
-import { readFileSync, readdirSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
-import { TOOL_SCHEMAS, executeTool } from './tools.js';
+import { TOOL_SCHEMAS, PATTERNS_DIR, executeTool } from './tools.js';
+
+// ---------------------------------------------------------------------------
+// Protofire web3 patterns — injected into agent system prompts at runtime
+// ---------------------------------------------------------------------------
+
+function buildPatternsHeader(): string {
+  try {
+    const files = readdirSync(PATTERNS_DIR).filter(f => !f.startsWith('.'));
+    if (!files.length) return '';
+    return `\n\n**Protofire Web3 Patterns & Best Practices** are available at ${PATTERNS_DIR}/\nFiles: ${files.join(', ')}\nUse list_files("${PATTERNS_DIR}") and read_file("${PATTERNS_DIR}/<file>") to access them before starting your task. These encode Protofire's lessons learned from production Web3 projects — check for relevant patterns.`;
+  } catch {
+    return '';
+  }
+}
+
+// Computed once at startup; empty string if no patterns loaded yet
+const PATTERNS_HEADER = existsSync(PATTERNS_DIR) ? buildPatternsHeader() : '';
+if (PATTERNS_HEADER) console.log(`[agents] Protofire patterns available: ${PATTERNS_DIR}`);
 
 // ---------------------------------------------------------------------------
 // Core team definitions
@@ -271,9 +289,11 @@ export async function runAgent(
   if (!agentDef) throw new Error(`Unknown agent role: ${role}`);
 
   const model = modelMap[role] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
-  const systemPrompt = context
-    ? `${agentDef.systemPrompt}\n\nProject context: ${context}`
-    : agentDef.systemPrompt;
+  const systemPrompt = [
+    agentDef.systemPrompt,
+    context ? `\n\nProject context: ${context}` : '',
+    PATTERNS_HEADER,
+  ].join('');
 
   const tools = getToolSchemas(role, task);
   const messages: ORMessage[] = [

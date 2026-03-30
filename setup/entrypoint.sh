@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # entrypoint.sh — NanoClaw Web3 Agency bootstrap
-# Orchestrates all setup steps then hands off to the NanoClaw process.
+# Orchestrates all setup steps then hands off to NanoClaw.
 # =============================================================================
 set -euo pipefail
 
@@ -17,6 +17,7 @@ die()  { echo "[agency] $(date -u +%H:%M:%SZ)  ERROR $*" >&2; exit 1; }
 
 log "========================================================="
 log "  agents-agency — Andy the Project Manager"
+log "  Powered by NanoClaw"
 log "  Project: ${PROJECT_NAME:-unknown}"
 log "========================================================="
 
@@ -43,9 +44,7 @@ log "Environment validation passed."
 # ---------------------------------------------------------------------------
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
   log "Configuring GitHub credentials..."
-  # URL rewrite: all https://github.com clones/pushes use the token transparently
   git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-  # Authenticate gh CLI (used by agents for PR creation, issue management)
   echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null \
     || warn "gh auth login failed — gh CLI may not work correctly."
   log "GitHub credentials configured (git + gh CLI)."
@@ -75,24 +74,35 @@ log "Step 3/3 — Configuring Project Manager Discord integration..."
 log "Step 3/3 — Done."
 
 # ---------------------------------------------------------------------------
-# Launch Discord bot
+# Launch NanoClaw
+# NanoClaw's DATA_DIR, GROUPS_DIR, and STORE_DIR are relative to cwd.
+# We run from /workspace/.agency so all state persists across restarts.
 # ---------------------------------------------------------------------------
-log "Starting Andy the Project Manager (Discord + OpenRouter)..."
-BOT_CMD="${APP_DIR}/skills/node_modules/.bin/tsx ${APP_DIR}/skills/bot.ts"
+log "Starting NanoClaw (Andy the Project Manager)..."
+
+# NanoClaw's DATA_DIR/STORE_DIR/GROUPS_DIR resolve relative to cwd.
+# Run from /app/nanoclaw so state lives in the container filesystem (writable
+# by agency regardless of host volume ownership).
+# bot.ts history and state.json go to /workspace/.agency (best-effort).
+mkdir -p /workspace/.agency 2>/dev/null || true
+cd /app/nanoclaw
+
+NANOCLAW_BIN="${APP_DIR}/nanoclaw/node_modules/.bin/tsx"
+NANOCLAW_SRC="${APP_DIR}/nanoclaw/src/index.ts"
 
 _shutdown() {
-  log "Shutdown signal received — stopping bot PID ${BOT_PID}"
+  log "Shutdown signal received — stopping NanoClaw PID ${BOT_PID}"
   kill -TERM "${BOT_PID}" 2>/dev/null
   wait "${BOT_PID}"
   exit 0
 }
 
-${BOT_CMD} &
+"${NANOCLAW_BIN}" "${NANOCLAW_SRC}" &
 BOT_PID=$!
-log "Bot PID: ${BOT_PID}"
+log "NanoClaw PID: ${BOT_PID}"
 trap '_shutdown' TERM INT
 
 wait ${BOT_PID}
 EXIT_CODE=$?
-log "Bot exited with code: ${EXIT_CODE}"
+log "NanoClaw exited with code: ${EXIT_CODE}"
 exit ${EXIT_CODE}

@@ -1,22 +1,16 @@
 /**
- * Discord bot — Andy the Project Manager.
+ * Andy the Project Manager — PM logic.
  *
- * Andy works asynchronously: acknowledges immediately, works in the background,
- * sends proactive progress updates, and asks for decisions when needed.
- * Users can interrupt mid-task with a new message to pivot direction.
+ * This module is called by NanoClaw's in-process container-runner (via
+ * handleMessage / resolveDecision). NanoClaw owns the Discord connection;
+ * this module owns the PM conversation loop, tool dispatch, and state.
  *
- * Agents now run agentic loops with real tools (read/write files, run commands).
+ * Key exports:
+ *   handleMessage(content, channelId, signal, send, sendFile)
+ *   resolveDecision(channelId, answer) → boolean
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { resolve, basename } from 'path';
-import {
-  AttachmentBuilder,
-  Client,
-  Events,
-  GatewayIntentBits,
-  Message,
-  TextChannel,
-} from 'discord.js';
 import {
   AGENTS,
   loadModelMap,
@@ -28,18 +22,15 @@ import {
 import { formatStateForPM, addRepo } from './state.js';
 import { runCommand } from './tools.js';
 
-const DISCORD_BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN    || '';
-const OPENROUTER_API_KEY   = process.env.OPENROUTER_API_KEY   || '';
-const DISCORD_PM_CHANNEL_ID = process.env.DISCORD_PM_CHANNEL_ID || '';
-const PROJECT_NAME         = process.env.PROJECT_NAME          || 'Web3 Project';
-const TRIGGER              = /^@andy\b/i;
-const MODELS_CONFIG        = '/app/config/models.json';
-const ROLES_DIR            = '/app/roles';
-const HISTORY_DIR          = '/workspace/.agency';
-const WORKSPACE            = '/workspace';
+const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
+const PROJECT_NAME          = process.env.PROJECT_NAME          || 'Web3 Project';
+const MODELS_CONFIG         = '/app/config/models.json';
+const ROLES_DIR             = '/app/roles';
+const PATTERNS_DIR          = '/app/patterns';
+const HISTORY_DIR           = '/workspace/.agency';
+const WORKSPACE             = '/workspace';
 
-if (!DISCORD_BOT_TOKEN)  { console.error('DISCORD_BOT_TOKEN is not set');  process.exit(1); }
-if (!OPENROUTER_API_KEY) { console.error('OPENROUTER_API_KEY is not set'); process.exit(1); }
+if (!OPENROUTER_API_KEY) { console.error('[bot] OPENROUTER_API_KEY is not set'); process.exit(1); }
 
 const modelMap       = loadModelMap(MODELS_CONFIG);
 const PM_MODEL       = modelMap['project-manager'] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
@@ -50,13 +41,30 @@ console.log(`[bot] Core team: ${AGENTS.map(a => a.role).join(', ')}`);
 console.log(`[bot] External roster: ${externalAgents.length} specialists available`);
 
 // ---------------------------------------------------------------------------
-// Discord state
+// OpenRouter types
 // ---------------------------------------------------------------------------
 
-let pmChannel: TextChannel | null = null;
-let currentExecution: AbortController | null = null;
+interface ORMessage {
+  role: string;
+  content: string | null;
+  tool_calls?: ORToolCall[];
+  tool_call_id?: string;
+}
 
-// Per-channel PM conversation history — in-memory cache, persisted to disk
+interface ORToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
+interface ORResponse {
+  choices: Array<{ finish_reason: string; message: ORMessage }>;
+}
+
+// ---------------------------------------------------------------------------
+// Per-channel conversation history (in-memory + disk)
+// ---------------------------------------------------------------------------
+
 const histories: Record<string, ORMessage[]> = {};
 
 function saveHistory(channelId: string, history: ORMessage[]): void {
@@ -82,105 +90,39 @@ function loadHistory(channelId: string): ORMessage[] {
 }
 
 // ---------------------------------------------------------------------------
-// Proactive messaging
+// Pending decision requests
+// When Andy calls request_decision, the next message for that channel
+// resolves the promise instead of starting a new PM loop.
 // ---------------------------------------------------------------------------
 
-async function notifyUser(msg: string): Promise<void> {
-  if (!pmChannel) return;
-  const chunks = msg.match(/[\s\S]{1,1900}/g) ?? [msg];
-  for (const chunk of chunks) {
-    await pmChannel.send(chunk).catch(err => console.error('[bot] notifyUser error:', err));
+const pendingDecisions = new Map<string, (answer: string) => void>();
+
+/**
+ * If there is a pending decision for this channel, resolve it and return true.
+ * Called by container-runner before starting a new PM loop.
+ */
+export function resolveDecision(channelId: string, answer: string): boolean {
+  const resolver = pendingDecisions.get(channelId);
+  if (resolver) {
+    resolver(answer);
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// PM system prompt
+// ---------------------------------------------------------------------------
+
+function patternsNote(): string {
+  try {
+    const files = readdirSync(PATTERNS_DIR).filter(f => !f.startsWith('.'));
+    if (!files.length) return '';
+    return `\n**Protofire Web3 Patterns** are loaded at \`${PATTERNS_DIR}/\` (${files.length} files). When delegating to specialists, mention relevant patterns or ask them to check that directory.\n`;
+  } catch {
+    return '';
   }
 }
-
-// ---------------------------------------------------------------------------
-// Artifact delivery — upload a file from /workspace to Discord
-// ---------------------------------------------------------------------------
-
-async function sendArtifact(filePath: string, description?: string): Promise<void> {
-  if (!pmChannel) return;
-  // Accept both relative (to /workspace) and absolute paths
-  const abs = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath);
-  if (!abs.startsWith(WORKSPACE + '/') && abs !== WORKSPACE) {
-    throw new Error(`Path outside workspace: ${filePath}`);
-  }
-  if (!existsSync(abs)) {
-    throw new Error(`File not found: ${filePath}`);
-  }
-  const attachment = new AttachmentBuilder(abs, { name: basename(abs) });
-  await pmChannel.send({ content: description ?? '', files: [attachment] })
-    .catch(err => console.error('[bot] sendArtifact error:', err));
-}
-
-// ---------------------------------------------------------------------------
-// Decision requests — PM pauses and asks user, waits for reply
-// ---------------------------------------------------------------------------
-
-async function requestDecision(
-  question: string,
-  options: string[] | undefined,
-  signal: AbortSignal,
-): Promise<string> {
-  const formatted = options?.length
-    ? `${question}\n\nOptions:\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}`
-    : question;
-
-  await notifyUser(`**Decision needed:**\n${formatted}`);
-
-  return new Promise<string>((resolve) => {
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-      clearTimeout(timer);
-      client.off(Events.MessageCreate, listener);
-    };
-
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve('(no response — timed out after 5 minutes, making best default choice)');
-    }, 5 * 60 * 1000);
-
-    signal.addEventListener('abort', () => {
-      cleanup();
-      resolve('(interrupted by new user message)');
-    }, { once: true });
-
-    const listener = (msg: Message) => {
-      if (msg.author.bot) return;
-      if (msg.channelId !== pmChannel?.id) return;
-      cleanup();
-      resolve(msg.content);
-    };
-
-    client.on(Events.MessageCreate, listener);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// OpenRouter types
-// ---------------------------------------------------------------------------
-
-interface ORMessage {
-  role: string;
-  content: string | null;
-  tool_calls?: ORToolCall[];
-  tool_call_id?: string;
-}
-
-interface ORToolCall {
-  id: string;
-  type: 'function';
-  function: { name: string; arguments: string };
-}
-
-interface ORResponse {
-  choices: Array<{ finish_reason: string; message: ORMessage }>;
-}
-
-// ---------------------------------------------------------------------------
-// PM system prompt (dynamic — includes current state)
-// ---------------------------------------------------------------------------
 
 function buildPMSystemPrompt(): string {
   const state = formatStateForPM();
@@ -207,7 +149,7 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 
 **Current project state:**
 ${state}
-
+${patternsNote()}
 Current project: ${PROJECT_NAME}`;
 }
 
@@ -331,6 +273,69 @@ const PM_TOOLS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Helpers that accept send/sendFile callbacks from the caller
+// ---------------------------------------------------------------------------
+
+async function notifyUser(
+  msg: string,
+  send: (text: string) => Promise<void>,
+): Promise<void> {
+  const chunks = msg.match(/[\s\S]{1,1900}/g) ?? [msg];
+  for (const chunk of chunks) {
+    await send(chunk).catch(err => console.error('[bot] notifyUser error:', err));
+  }
+}
+
+async function sendArtifact(
+  filePath: string,
+  description: string | undefined,
+  sendFile: (path: string, desc: string) => Promise<void>,
+): Promise<void> {
+  const abs = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath);
+  if (!abs.startsWith(WORKSPACE + '/') && abs !== WORKSPACE) {
+    throw new Error(`Path outside workspace: ${filePath}`);
+  }
+  if (!existsSync(abs)) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+  await sendFile(abs, description ?? basename(abs));
+}
+
+async function requestDecision(
+  channelId: string,
+  question: string,
+  options: string[] | undefined,
+  signal: AbortSignal,
+  send: (text: string) => Promise<void>,
+): Promise<string> {
+  const formatted = options?.length
+    ? `${question}\n\nOptions:\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}`
+    : question;
+
+  await notifyUser(`**Decision needed:**\n${formatted}`, send);
+
+  return new Promise<string>((res) => {
+    let done = false;
+    const finish = (answer: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      pendingDecisions.delete(channelId);
+      res(answer);
+    };
+
+    const timer = setTimeout(
+      () => finish('(no response — timed out after 5 minutes, making best default choice)'),
+      5 * 60 * 1000,
+    );
+
+    signal.addEventListener('abort', () => finish('(interrupted by new user message)'), { once: true });
+
+    pendingDecisions.set(channelId, finish);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // PM async execution loop
 // ---------------------------------------------------------------------------
 
@@ -338,12 +343,13 @@ async function runPMAsync(
   channelId: string,
   userMessage: string,
   signal: AbortSignal,
+  send: (text: string) => Promise<void>,
+  sendFile: (path: string, desc: string) => Promise<void>,
 ): Promise<void> {
-  // Load from disk if not already in memory (e.g. after a restart)
   if (!histories[channelId]) {
     histories[channelId] = loadHistory(channelId);
     if (histories[channelId].length > 0) {
-      console.log(`[bot] Restored ${histories[channelId].length} messages from disk for channel ${channelId}`);
+      console.log(`[bot] Restored ${histories[channelId].length} messages for channel ${channelId}`);
     }
   }
   const history = histories[channelId];
@@ -375,24 +381,23 @@ async function runPMAsync(
     const assistantMsg = choice.message;
     history.push(assistantMsg);
 
-    // PM finished — send final reply
+    // PM finished — send final reply to client
     if (choice.finish_reason !== 'tool_calls' || !assistantMsg.tool_calls?.length) {
       if (assistantMsg.content) {
-        await notifyUser(assistantMsg.content);
+        await notifyUser(assistantMsg.content, send);
       }
       histories[channelId] = history.slice(-40);
       saveHistory(channelId, histories[channelId]);
       return;
     }
 
-    // PM has reasoning text alongside tool calls — share it as a thought
+    // Share any reasoning text the PM produced alongside its tool calls
     if (assistantMsg.content?.trim()) {
-      await notifyUser(`💭 ${assistantMsg.content.trim()}`);
+      await notifyUser(`💭 ${assistantMsg.content.trim()}`, send);
     }
 
     if (signal.aborted) return;
 
-    // Execute PM tool calls in parallel
     const toolCalls = assistantMsg.tool_calls;
     console.log(`[bot] PM → ${toolCalls.map(tc => {
       try {
@@ -406,11 +411,10 @@ async function runPMAsync(
     const toolResults = await Promise.all(
       toolCalls.map(async (tc): Promise<ORMessage> => {
         if (signal.aborted) return { role: 'tool', tool_call_id: tc.id, content: '(interrupted)' };
-
         let resultContent: string;
         try {
           const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-          resultContent = await dispatchPMTool(tc.function.name, args, signal);
+          resultContent = await dispatchPMTool(tc.function.name, args, channelId, signal, send, sendFile);
         } catch (err) {
           resultContent = `Error: ${(err as Error).message}`;
           console.error('[bot] PM tool error:', err);
@@ -424,24 +428,29 @@ async function runPMAsync(
 
   histories[channelId] = history.slice(-40);
   saveHistory(channelId, histories[channelId]);
-  await notifyUser('I hit the maximum planning rounds. Please give me a more specific instruction to continue.');
+  await notifyUser('I hit the maximum planning rounds. Please give me a more specific instruction to continue.', send);
 }
 
 async function dispatchPMTool(
   name: string,
   args: Record<string, unknown>,
+  channelId: string,
   signal: AbortSignal,
+  send: (text: string) => Promise<void>,
+  sendFile: (path: string, desc: string) => Promise<void>,
 ): Promise<string> {
   switch (name) {
     case 'send_update':
-      await notifyUser(args['message'] as string);
+      await notifyUser(args['message'] as string, send);
       return 'Update sent.';
 
     case 'request_decision': {
       const answer = await requestDecision(
+        channelId,
         args['question'] as string,
         args['options'] as string[] | undefined,
         signal,
+        send,
       );
       return `Client answered: ${answer}`;
     }
@@ -455,26 +464,26 @@ async function dispatchPMTool(
       const agentDef = AGENTS.find(a => a.role === role);
       const agentName = agentDef?.name ?? role;
       const taskPreview = task.length > 120 ? task.slice(0, 120) + '…' : task;
-      await notifyUser(`🔧 **${agentName}** — ${taskPreview}`);
+      await notifyUser(`🔧 **${agentName}** — ${taskPreview}`, send);
       const result = await runAgent(
         role,
         task,
         `Project: ${PROJECT_NAME}`,
         modelMap,
         OPENROUTER_API_KEY,
-        (msg) => notifyUser(`⚙️ ${msg}`),
+        (msg) => notifyUser(`⚙️ ${msg}`, send),
       );
       if (result.status === 'blocked') {
-        await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`);
+        await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`, send);
         return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
       }
-      await notifyUser(`✅ **${agentName}** — done`);
+      await notifyUser(`✅ **${agentName}** — done`, send);
       return result.output;
     }
 
     case 'hire_specialist': {
       const roleDesc = args['role_description'] as string;
-      await notifyUser(`🔍 Hiring **${roleDesc}**…`);
+      await notifyUser(`🔍 Hiring **${roleDesc}**…`, send);
       const { agentName, reply } = await runExternalAgent(
         roleDesc,
         args['task'] as string,
@@ -483,22 +492,18 @@ async function dispatchPMTool(
         modelMap,
         OPENROUTER_API_KEY,
       );
-      await notifyUser(`✅ **${agentName}** — done`);
+      await notifyUser(`✅ **${agentName}** — done`, send);
       return `[${agentName}]: ${reply}`;
     }
 
     case 'send_artifact': {
-      const filePath = args['path'] as string;
-      const description = args['description'] as string | undefined;
-      await sendArtifact(filePath, description);
-      return `Artifact sent: ${filePath}`;
+      await sendArtifact(args['path'] as string, args['description'] as string | undefined, sendFile);
+      return `Artifact sent: ${args['path']}`;
     }
 
     case 'add_repo': {
       const url = (args['url'] as string).replace(/\.git$/, '');
-      const name = (args['name'] as string | undefined)
-        ?? url.split('/').pop()
-        ?? 'repo';
+      const name = (args['name'] as string | undefined) ?? url.split('/').pop() ?? 'repo';
       const branch = (args['branch'] as string | undefined) ?? 'main';
       const localPath = `/workspace/${name}`;
 
@@ -507,7 +512,10 @@ async function dispatchPMTool(
         return `Repo already exists at ${localPath} — registered in project state.`;
       }
 
-      const result = runCommand(`git clone --depth 1 --branch "${branch}" "${url}.git" "${localPath}" 2>&1 || git clone --depth 1 "${url}.git" "${localPath}"`, 120_000);
+      const result = runCommand(
+        `git clone --depth 1 --branch "${branch}" "${url}.git" "${localPath}" 2>&1 || git clone --depth 1 "${url}.git" "${localPath}"`,
+        120_000,
+      );
       if (result.exitCode !== 0) {
         return `Clone failed:\n${result.stderr || result.stdout}`;
       }
@@ -521,77 +529,29 @@ async function dispatchPMTool(
 }
 
 // ---------------------------------------------------------------------------
-// Discord client
+// Public API — called by NanoClaw's container-runner
 // ---------------------------------------------------------------------------
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
-  ],
-});
-
-client.once(Events.ClientReady, async (c) => {
-  console.log(`[bot] Discord connected as ${c.user.tag}`);
-  console.log(`[bot] PM model: ${PM_MODEL}`);
-  console.log(`[bot] External specialists: ${externalAgents.length}`);
-
-  // Cache the PM channel for proactive messaging
-  if (DISCORD_PM_CHANNEL_ID) {
-    try {
-      pmChannel = await client.channels.fetch(DISCORD_PM_CHANNEL_ID) as TextChannel;
-      console.log(`[bot] PM channel ready: #${pmChannel.name}`);
-    } catch (err) {
-      console.warn('[bot] Could not fetch PM channel:', err);
-    }
-  }
-});
-
-client.on(Events.MessageCreate, async (message: Message) => {
-  if (message.author.bot) return;
-
-  const botId = client.user?.id ?? '';
-  const isMentioned = message.mentions.users.has(botId);
-  const isTrigger = TRIGGER.test(message.content.trim());
-  if (!isMentioned && !isTrigger) return;
-
-  let content = message.content
-    .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
-    .replace(TRIGGER, '')
-    .trim();
-  if (!content) content = 'Hello!';
-
-  // Set pmChannel from the message channel if not already set
-  if (!pmChannel && 'send' in message.channel) {
-    pmChannel = message.channel as TextChannel;
-  }
-
-  // Interrupt any in-progress execution
-  if (currentExecution) {
-    currentExecution.abort();
-    currentExecution = null;
-    await notifyUser('Noted — pivoting to your new request.');
-  }
-
-  // Acknowledge immediately
-  await message.reply('On it.');
-
-  // Start background execution
-  const ctrl = new AbortController();
-  currentExecution = ctrl;
-
-  runPMAsync(message.channelId, content, ctrl.signal).catch(async (err) => {
-    if (ctrl.signal.aborted) return;
+/**
+ * Handle an inbound message for the PM channel.
+ * Called by container-runner.ts for every message NanoClaw routes to Andy.
+ *
+ * @param content   The user message (may include NanoClaw timestamp prefix)
+ * @param channelId Discord channel ID (NanoClaw chatJid)
+ * @param signal    AbortSignal — aborted if a new message interrupts this one
+ * @param send      Callback to stream text back to Discord via NanoClaw
+ * @param sendFile  Callback to upload a file attachment to Discord
+ */
+export async function handleMessage(
+  content: string,
+  channelId: string,
+  signal: AbortSignal,
+  send: (text: string) => Promise<void>,
+  sendFile: (path: string, desc: string) => Promise<void>,
+): Promise<void> {
+  await runPMAsync(channelId, content, signal, send, sendFile).catch(async (err) => {
+    if (signal.aborted) return;
     console.error('[bot] PM execution error:', err);
-    await notifyUser(`Something went wrong: ${(err as Error).message}`);
-  }).finally(() => {
-    if (currentExecution === ctrl) currentExecution = null;
+    await notifyUser(`Something went wrong: ${(err as Error).message}`, send);
   });
-});
-
-client.login(DISCORD_BOT_TOKEN);
-
-process.on('SIGTERM', () => { console.log('[bot] Shutting down...'); client.destroy(); process.exit(0); });
-process.on('SIGINT',  () => { console.log('[bot] Shutting down...'); client.destroy(); process.exit(0); });
+}

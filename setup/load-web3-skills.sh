@@ -8,7 +8,7 @@ set -euo pipefail
 
 APP_DIR="/app"
 WEB3_SKILLS_DIR="${APP_DIR}/web3-skills"
-NANOCLAW_SKILLS_DIR="${APP_DIR}/skills"
+PATTERNS_DIR="${APP_DIR}/patterns"
 DEPLOY_KEY_PATH="/run/secrets/git_deploy_key"
 
 log()  { echo "[load-web3-skills] $*"; }
@@ -70,28 +70,21 @@ fi
 log "web3-skills cloned successfully."
 
 # ---------------------------------------------------------------------------
-# Merge skills into NanoClaw
+# Copy patterns and good-practices docs into /app/patterns/
+# Agents read these via read_file("/app/patterns/<file>").
 # ---------------------------------------------------------------------------
-mkdir -p "${NANOCLAW_SKILLS_DIR}"
+mkdir -p "${PATTERNS_DIR}"
 
-SKILLS_SOURCE="${WEB3_SKILLS_DIR}/skills"
-if [[ -d "${SKILLS_SOURCE}" ]]; then
-  log "Merging web3-skills/skills/ → nanoclaw/skills/..."
-  cp -r "${SKILLS_SOURCE}/." "${NANOCLAW_SKILLS_DIR}/"
-  SKILL_COUNT=$(find "${SKILLS_SOURCE}" -name "*.ts" -o -name "*.js" | wc -l | tr -d ' ')
-  log "Merged ${SKILL_COUNT} skill file(s) from web3-skills."
-else
-  # Fallback: treat entire repo contents as skills directory
-  log "No skills/ subdirectory found — merging entire repo as skills..."
-  cp -r "${WEB3_SKILLS_DIR}/." "${NANOCLAW_SKILLS_DIR}/"
-fi
-
-# Copy patterns and good-practices docs if present
 PATTERNS_SOURCE="${WEB3_SKILLS_DIR}/patterns"
 if [[ -d "${PATTERNS_SOURCE}" ]]; then
-  log "Copying Protofire patterns and good practices..."
-  mkdir -p "${APP_DIR}/patterns"
-  cp -r "${PATTERNS_SOURCE}/." "${APP_DIR}/patterns/"
+  log "Copying Protofire patterns → ${PATTERNS_DIR}..."
+  cp -r "${PATTERNS_SOURCE}/." "${PATTERNS_DIR}/"
+  PATTERN_COUNT=$(find "${PATTERNS_SOURCE}" -type f | wc -l | tr -d ' ')
+  log "Copied ${PATTERN_COUNT} pattern file(s)."
+else
+  # Fallback: treat the whole repo as patterns if no patterns/ subdir
+  log "No patterns/ subdirectory found — copying entire repo as patterns..."
+  cp -r "${WEB3_SKILLS_DIR}/." "${PATTERNS_DIR}/"
 fi
 
 # ---------------------------------------------------------------------------
