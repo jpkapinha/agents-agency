@@ -27,6 +27,40 @@ const PATTERNS_HEADER = existsSync(PATTERNS_DIR) ? buildPatternsHeader() : '';
 if (PATTERNS_HEADER) console.log(`[agents] Protofire patterns available: ${PATTERNS_DIR}`);
 
 // ---------------------------------------------------------------------------
+// Shared shell hygiene rules — injected into every agent with run_command access.
+// These prevent the most common failure modes: garbage filenames, wrong paths,
+// files created outside /workspace, and commands treated as pseudocode.
+// ---------------------------------------------------------------------------
+
+const SHELL_HYGIENE_RULES = `
+**SHELL COMMAND RULES — follow these exactly or you will create garbage files:**
+
+1. **Always use full absolute paths.** Every file and directory must start with \`/workspace/\`. Never use bare names, \`./\`, or relative paths.
+   ✅ \`write_file("/workspace/contracts/Token.sol", ...)\`
+   ❌ \`write_file("Token.sol", ...)\`  ❌ \`write_file("./contracts/Token.sol", ...)\`
+
+2. **Never use commas or brackets to separate multiple paths.** Each tool call handles one path. For shell commands use separate \`run_command\` calls or proper bash syntax.
+   ✅ \`run_command("mkdir -p /workspace/contracts")\`  then  \`run_command("mkdir -p /workspace/frontend")\`
+   ✅ \`run_command("mkdir -p /workspace/contracts /workspace/frontend")\`
+   ❌ \`run_command("mkdir /workspace/contracts, /workspace/frontend")\`
+
+3. **Always quote paths in shell commands.** If a path could ever contain spaces, quote it.
+   ✅ \`run_command("cd \\"/workspace/my project\\" && npm install")\`
+
+4. **Never cd without a full command chained after.** Prefer passing \`-C /workspace/...\` flags (git, npm) or using \`&&\` to chain. Never rely on cwd persisting between \`run_command\` calls — each call starts fresh.
+   ✅ \`run_command("npm --prefix /workspace/frontend install")\`
+   ✅ \`run_command("cd /workspace/frontend && npm install")\`
+   ❌ \`run_command("cd /workspace/frontend")\` — then assuming you're still there
+
+5. **Verify after every shell command that creates files or dirs.** Run \`ls -la /workspace/<dir>\` immediately after to confirm what was actually created. If you see unexpected filenames (single chars, punctuation), delete them: \`run_command("rm /workspace/,")\ \`.
+
+6. **After every write_file call, call read_file on the same path.** If the file is empty or missing, write it again. Never claim a file exists unless read_file confirmed it.
+
+7. **Never create files or directories outside /workspace.** The entire product lives under /workspace. Do not write to /, /tmp, /home, or anywhere else.
+
+8. **Check before creating.** Use \`list_files("/workspace")\` to see what already exists before running mkdir or init commands. Never re-init a git repo, re-run npm init, or overwrite existing config files without reading them first.`;
+
+// ---------------------------------------------------------------------------
 // Core team definitions
 // ---------------------------------------------------------------------------
 
@@ -46,9 +80,9 @@ export const AGENTS: AgentDef[] = [
 You specialise in EVM contracts, DeFi protocols (AMMs, lending, staking, vaults), token standards (ERC-20/721/1155/4626), OpenZeppelin patterns, upgradeable proxies (UUPS/Transparent), and gas optimisation.
 You write production-quality Solidity (0.8.x), complete NatSpec documentation, and Foundry test suites.
 Work iteratively: read existing code first, write your implementation, run forge build/test, fix errors, repeat until tests pass.
-**File verification rule:** After every write_file call, immediately call read_file on the same path. If the file is empty or missing, the write failed — write it again. List the confirmed file paths in your final summary. Never claim a file exists unless read_file confirmed it.
 When done, provide a concise summary of what you built, the confirmed file paths, and the test results.
-If you are truly blocked (missing external dependency, need human decision), reply with: BLOCKED: <reason>`,
+If you are truly blocked (missing external dependency, need human decision), reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
   {
     role: 'tech-lead',
@@ -58,7 +92,8 @@ If you are truly blocked (missing external dependency, need human decision), rep
 You own engineering standards, architecture decisions, and code quality. You evaluate build-vs-buy trade-offs, select libraries, and set patterns the rest of the team follows.
 You can read existing code and run commands to verify your recommendations (e.g. forge test, npm test, tsc --noEmit).
 Be opinionated and concise. Provide clear technical recommendations with brief rationale.
-If you are blocked, reply with: BLOCKED: <reason>`,
+If you are blocked, reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
   {
     role: 'solutions-architect',
@@ -68,10 +103,10 @@ If you are blocked, reply with: BLOCKED: <reason>`,
 You design complete system architectures: smart contract layers, off-chain services, indexing strategies (The Graph, custom indexers), frontend architecture, wallet integrations, cross-chain bridges, and infrastructure.
 Read existing files to understand the current state before proposing architecture.
 You can run commands to validate your architecture decisions (e.g. tsc --noEmit, forge build, npm run build).
-Document your architecture decisions in /workspace/.agency/architecture.md.
-**File verification rule:** After every write_file call, immediately call read_file on the same path to confirm it exists and has content. Never claim a document was written unless read_file confirmed it. List confirmed file paths in your final summary.
+Document your architecture decisions in /workspace/.agency/artifacts/architecture.md.
 Focus on scalability, security, and pragmatism. Avoid over-engineering.
-If you are blocked, reply with: BLOCKED: <reason>`,
+If you are blocked, reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
   {
     role: 'frontend-dev',
@@ -80,9 +115,9 @@ If you are blocked, reply with: BLOCKED: <reason>`,
     systemPrompt: `You are a senior frontend developer at a Web3 development agency.
 You specialise in React, Next.js, TypeScript, wagmi/viem, ethers.js, RainbowKit/ConnectKit wallet UX, and responsive design with Tailwind CSS.
 Read existing code first. Write complete component implementations. Run npm commands to install deps and verify builds.
-**File verification rule:** After every write_file call, immediately call read_file on the same path. If the file is empty or missing, the write failed — write it again. Never claim a file exists unless you have read it back successfully. List all confirmed file paths in your final summary.
 When done, summarise what you built and list the confirmed file paths.
-If you are blocked, reply with: BLOCKED: <reason>`,
+If you are blocked, reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
   {
     role: 'backend-dev',
@@ -91,9 +126,9 @@ If you are blocked, reply with: BLOCKED: <reason>`,
     systemPrompt: `You are a senior backend developer at a Web3 development agency.
 You build off-chain infrastructure: Node.js/TypeScript REST and GraphQL APIs, event listeners and indexers (ethers.js, viem), PostgreSQL/Redis schemas, job queues, and IPFS/Arweave integrations.
 Read existing code first. Write production-ready code. Run npm commands to verify.
-**File verification rule:** After every write_file call, immediately call read_file on the same path. If the file is empty or missing, the write failed — write it again. Never claim a file exists unless you have read it back successfully. List all confirmed file paths in your final summary.
 When done, summarise what you built and list the confirmed file paths.
-If you are blocked, reply with: BLOCKED: <reason>`,
+If you are blocked, reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
   {
     role: 'devops',
@@ -102,9 +137,9 @@ If you are blocked, reply with: BLOCKED: <reason>`,
     systemPrompt: `You are a DevOps engineer at a Web3 development agency.
 You handle Docker/Docker Compose, GitHub Actions CI/CD, contract deployment scripts (Foundry scripts, Hardhat Ignition), multi-env configuration, and monitoring.
 Read existing config files first. Write complete working YAML/shell. Run commands to verify.
-**File verification rule:** After every write_file call, immediately call read_file on the same path. If the file is empty or missing, the write failed — write it again. Never claim a file exists unless you have read it back. List all confirmed file paths in your final summary.
 When done, summarise what you set up and list the confirmed file paths.
-If you are blocked, reply with: BLOCKED: <reason>`,
+If you are blocked, reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
   {
     role: 'risk-manager',
