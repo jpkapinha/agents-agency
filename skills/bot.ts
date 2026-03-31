@@ -14,12 +14,13 @@ import { resolve, basename } from 'path';
 import {
   AGENTS,
   loadModelMap,
+  loadProfileNames,
   runAgent,
   loadExternalAgents,
   runExternalAgent,
   type ExternalAgentDef,
 } from './agents.js';
-import { formatStateForPM, addRepo, updateMemory, getMemory, addTask, updateTask } from './state.js';
+import { formatStateForPM, addRepo, updateMemory, getMemory, addTask, updateTask, getActiveProfile, setActiveProfile } from './state.js';
 import { runCommand, readPdf } from './tools.js';
 import { channelSend } from './channel-send.js';
 
@@ -164,11 +165,21 @@ function readArtifact(name: string): string {
   }
 }
 
-const modelMap       = loadModelMap(MODELS_CONFIG);
-const PM_MODEL       = modelMap['project-manager'] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
+// modelMap is mutable so it can be hot-swapped when the user switches profiles.
+// Always read PM_MODEL from modelMap inline — never cache it separately.
+let modelMap: Record<string, string> = {};
+
+function reloadModelMap(): void {
+  const profile = getActiveProfile();
+  modelMap = loadModelMap(MODELS_CONFIG, profile);
+  const pm = modelMap['project-manager'] ?? modelMap['__default__'] ?? 'unknown';
+  console.log(`[bot] Model profile: ${profile ?? '(none — will ask user)'} | PM: ${pm}`);
+}
+
+reloadModelMap();
+
 const externalAgents: ExternalAgentDef[] = loadExternalAgents(ROLES_DIR);
 
-console.log(`[bot] PM model: ${PM_MODEL}`);
 console.log(`[bot] Core team: ${AGENTS.map(a => a.role).join(', ')}`);
 console.log(`[bot] External roster: ${externalAgents.length} specialists available`);
 
@@ -326,8 +337,13 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
     d. Call \`request_decision\` asking the client to confirm the change plan (type APPROVED or ask for revisions).
     e. Once approved: update \`prd.md\` and \`backlog.md\` to reflect the new direction, then dispatch the minimal set of agents needed to implement the changes — referencing the change plan in each task description.
     f. Call \`update_memory\` to record the pivot decision.
+20. **Model team (profiles):** You work with configurable teams of AI models. Use \`get_model_profiles\` to list available options and \`switch_model_profile\` to change. The active profile persists across sessions.
+    - **⚠️ FIRST-USE RULE:** If the active model profile has not been set yet (shown below as "none"), you MUST call \`get_model_profiles\` and then \`request_decision\` asking the client which model team to use BEFORE doing anything else — even if they sent a task or question.
+    - When the client says "switch to testing", "use cheap models", "use production", etc. — call \`switch_model_profile\` immediately.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
+
+**Active model team:** ${getActiveProfile() ?? '⚠️ none — ask the client before proceeding (rule 20)'}
 
 **Current project state:**
 ${state}
@@ -572,6 +588,33 @@ const WAIT_FOR_TASKS_TOOL = {
   },
 };
 
+const GET_MODEL_PROFILES_TOOL = {
+  type: 'function',
+  function: {
+    name: 'get_model_profiles',
+    description: 'List all available model profiles (teams of AI models) with their descriptions and per-role model assignments. Use this to show the client what options are available before asking them to choose.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
+const SWITCH_MODEL_PROFILE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'switch_model_profile',
+    description: 'Switch the active model profile for this project. The choice persists across Docker restarts. Use after the client confirms which profile they want.',
+    parameters: {
+      type: 'object',
+      properties: {
+        profile: {
+          type: 'string',
+          description: 'Profile name to activate, e.g. "testing" or "production"',
+        },
+      },
+      required: ['profile'],
+    },
+  },
+};
+
 const LIST_ARTIFACTS_TOOL = {
   type: 'function',
   function: {
@@ -627,6 +670,8 @@ const PM_TOOLS = [
   GET_COSTS_TOOL,
   GET_RUNNING_TASKS_TOOL,
   WAIT_FOR_TASKS_TOOL,
+  GET_MODEL_PROFILES_TOOL,
+  SWITCH_MODEL_PROFILE_TOOL,
   LIST_ARTIFACTS_TOOL,
   READ_ARTIFACT_TOOL,
   UPDATE_ARTIFACT_TOOL,
@@ -723,7 +768,7 @@ async function runPMAsync(
       method: 'POST',
       headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: PM_MODEL,
+        model: modelMap['project-manager'] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5',
         messages: [{ role: 'system', content: buildPMSystemPrompt() }, ...history],
         tools: PM_TOOLS,
         tool_choice: 'auto',
@@ -1246,6 +1291,40 @@ async function dispatchPMTool(
       const content = args['content'] as string;
       const path    = writeArtifact(name, content);
       return `Artifact "${name}" written (${content.length} chars) → ${path}`;
+    }
+
+    case 'get_model_profiles': {
+      const profiles = loadProfileNames(MODELS_CONFIG);
+      if (!profiles.length) return 'No profiles configured in models.json.';
+      const active = getActiveProfile();
+      const lines = [
+        `**Available model teams:**`,
+        '',
+        ...profiles.map(p => {
+          const marker = p.name === active ? ' ← active' : '';
+          const roleLines = Object.entries(p.roles)
+            .map(([role, model]) => `  • ${role}: ${model.replace(/^openrouter\//, '').split('/').pop()}`)
+            .join('\n');
+          return `**${p.name}**${marker} — ${p.description}\n${roleLines}`;
+        }),
+      ];
+      return lines.join('\n');
+    }
+
+    case 'switch_model_profile': {
+      const profile = args['profile'] as string;
+      const profiles = loadProfileNames(MODELS_CONFIG);
+      const found = profiles.find(p => p.name === profile);
+      if (!found) {
+        const available = profiles.map(p => p.name).join(', ');
+        return `Profile "${profile}" not found. Available profiles: ${available}`;
+      }
+      setActiveProfile(profile);
+      reloadModelMap();
+      const roleLines = Object.entries(found.roles)
+        .map(([role, model]) => `• ${role}: ${model.replace(/^openrouter\//, '').split('/').pop()}`)
+        .join('\n');
+      return `✅ Switched to **${profile}** — ${found.description}\n\n${roleLines}\n\nThis setting persists across sessions.`;
     }
 
     default:

@@ -1,16 +1,37 @@
 {
-  "roles": {
-    "project-manager": "openrouter/moonshotai/kimi-k2.5",
-    "product-manager": "openrouter/moonshotai/kimi-k2.5",
-    "tech-lead": "openrouter/anthropic/claude-4.6-sonnet",
-    "solutions-architect": "openrouter/anthropic/claude-4.6-opus",
-    "frontend-dev": "openrouter/moonshotai/kimi-k2.5",
-    "backend-dev": "openrouter/anthropic/claude-4.6-sonnet",
-    "solidity-dev": "openrouter/anthropic/claude-4.6-sonnet",
-    "devops": "openrouter/moonshotai/kimi-k2.5",
-    "risk-manager": "openrouter/anthropic/claude-4.6-opus",
-    "qa-verifier": "openrouter/moonshotai/kimi-k2.5"
+  "profiles": {
+    "testing": {
+      "description": "Fast & cheap — all roles use kimi-k2.5. Good for iteration, flow testing, and low-cost runs.",
+      "roles": {
+        "project-manager":    "openrouter/moonshotai/kimi-k2.5",
+        "product-manager":    "openrouter/moonshotai/kimi-k2.5",
+        "tech-lead":          "openrouter/moonshotai/kimi-k2.5",
+        "solutions-architect":"openrouter/moonshotai/kimi-k2.5",
+        "frontend-dev":       "openrouter/moonshotai/kimi-k2.5",
+        "backend-dev":        "openrouter/moonshotai/kimi-k2.5",
+        "solidity-dev":       "openrouter/moonshotai/kimi-k2.5",
+        "devops":             "openrouter/moonshotai/kimi-k2.5",
+        "risk-manager":       "openrouter/moonshotai/kimi-k2.5",
+        "qa-verifier":        "openrouter/moonshotai/kimi-k2.5"
+      },
+      "default": "openrouter/moonshotai/kimi-k2.5"
+    },
+    "production": {
+      "description": "Best capability per role — Opus for architecture & risk, Sonnet for builders & tech-lead, kimi for PM/devops/QA.",
+      "roles": {
+        "project-manager":    "openrouter/moonshotai/kimi-k2.5",
+        "product-manager":    "openrouter/moonshotai/kimi-k2.5",
+        "tech-lead":          "openrouter/anthropic/claude-sonnet-4-5",
+        "solutions-architect":"openrouter/anthropic/claude-opus-4-5",
+        "frontend-dev":       "openrouter/moonshotai/kimi-k2.5",
+        "backend-dev":        "openrouter/anthropic/claude-sonnet-4-5",
+        "solidity-dev":       "openrouter/anthropic/claude-sonnet-4-5",
+        "devops":             "openrouter/moonshotai/kimi-k2.5",
+        "risk-manager":       "openrouter/anthropic/claude-opus-4-5",
+        "qa-verifier":        "openrouter/moonshotai/kimi-k2.5"
+      },
+      "default": "openrouter/moonshotai/kimi-k2.5"
+    }
   },
-  "default": "openrouter/moonshotai/kimi-k2.5",
   "cost-warning-threshold-usd": 5
 }
