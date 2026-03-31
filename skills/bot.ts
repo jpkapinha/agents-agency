@@ -22,7 +22,7 @@ import {
 } from './agents.js';
 import { formatStateForPM, addRepo, updateMemory, getMemory, addTask, updateTask, getActiveProfile, setActiveProfile } from './state.js';
 import { runCommand, readPdf } from './tools.js';
-import { channelSend } from './channel-send.js';
+import { channelSend, triggerTyping } from './channel-send.js';
 
 const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
 const PROJECT_NAME          = process.env.PROJECT_NAME          || 'Web3 Project';
@@ -785,6 +785,17 @@ async function runPMAsync(
     const assistantMsg = choice.message;
     history.push(assistantMsg);
 
+    // PM response truncated — model hit its output token limit mid-sentence.
+    // Push a continuation prompt and loop rather than sending a cut-off message.
+    if (choice.finish_reason === 'length') {
+      if (assistantMsg.content?.trim()) {
+        // Send whatever partial content arrived so the user isn't left in silence
+        await notifyUser(assistantMsg.content.trim(), send);
+      }
+      history.push({ role: 'user', content: 'Please continue your response from where you left off.' });
+      continue;
+    }
+
     // PM finished — send final reply to client
     if (choice.finish_reason !== 'tool_calls' || !assistantMsg.tool_calls?.length) {
       if (assistantMsg.content) {
@@ -905,6 +916,11 @@ async function dispatchPMTool(
       };
 
       const promise = (async () => {
+        // Show Discord "is typing..." while this agent is working.
+        // Fire immediately, then every 8 seconds — Discord clears it after ~10s.
+        triggerTyping(channelId).catch(() => {});
+        const typingInterval = setInterval(() => triggerTyping(channelId).catch(() => {}), 8000);
+
         try {
           const result = await runAgent(
             role,
@@ -1031,6 +1047,7 @@ async function dispatchPMTool(
           await bg(`❌ **${agentName}** — unexpected error: ${(err as Error).message}`);
           updateTask(trackedTask.id, { status: 'blocked', result: (err as Error).message });
         } finally {
+          clearInterval(typingInterval);
           bgRemove(channelId, trackedTask.id);
         }
       })();
