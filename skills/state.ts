@@ -101,6 +101,7 @@ function defaultState(): ProjectState {
       outOfScope: [],
       lastUpdated: new Date().toISOString(),
     },
+    activeModelProfile: 'testing',
   };
 }
 
@@ -284,8 +285,8 @@ export function updateMemory(updates: Partial<Omit<ProjectMemory, 'lastUpdated'>
 // Model profile helpers
 // ---------------------------------------------------------------------------
 
-export function getActiveProfile(): string | undefined {
-  return loadState().activeModelProfile;
+export function getActiveProfile(): string {
+  return loadState().activeModelProfile ?? 'testing';
 }
 
 export function setActiveProfile(name: string): void {
