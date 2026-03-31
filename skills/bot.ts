@@ -1423,22 +1423,28 @@ async function dispatchPMTool(
       const gitignorePath = '/workspace/.gitignore';
       if (!existsSync(gitignorePath)) {
         writeFileSync(gitignorePath, [
+          '# Agency internal tooling — never part of the product',
+          '.agency/',
+          '',
+          '# Dependencies',
           'node_modules/',
+          '',
+          '# Environment',
           '.env',
           '.env.*',
           '!.env.example',
-          '*.log',
-          '*.tmp',
-          '.DS_Store',
+          '',
+          '# Build outputs',
           'dist/',
           'build/',
           'cache/',
           'out/',
           '.foundry/',
-          '.agency/history-*.json',
-          '.agency/costs.json',
-          '.agency/uploads/',
-          '.agency/state.json.tmp',
+          '',
+          '# Misc',
+          '*.log',
+          '*.tmp',
+          '.DS_Store',
         ].join('\n') + '\n', 'utf-8');
       }
 
