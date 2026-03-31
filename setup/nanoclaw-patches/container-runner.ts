@@ -7,7 +7,7 @@
  */
 import { ChildProcess } from 'child_process';
 import { handleMessage, resolveDecision } from './skills/bot.js';
-import { registerChannelSend } from './skills/channel-send.js';
+import { registerChannelSend, registerChannelTyping } from './skills/channel-send.js';
 import { RegisteredGroup } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -75,6 +75,7 @@ export async function runContainerAgent(
   // Background agent tasks use this via channelSend() in bot.ts so they can
   // post progress/completion updates even after the PM loop has been aborted.
   registerChannelSend(chatJid, (text: string) => sendTextToDiscord(chatJid, text));
+  registerChannelTyping(chatJid, () => sendTypingToDiscord(chatJid));
 
   // upload a file attachment via Discord REST API directly
   const sendFile = async (filePath: string, description: string): Promise<void> => {
@@ -103,6 +104,16 @@ export async function runContainerAgent(
 // ---------------------------------------------------------------------------
 // Discord REST API helpers — used for persistent sends and file uploads
 // ---------------------------------------------------------------------------
+
+/** Trigger the "is typing..." indicator in a Discord channel. Lasts ~10 seconds. */
+async function sendTypingToDiscord(channelId: string): Promise<void> {
+  const token = process.env['DISCORD_BOT_TOKEN'];
+  if (!token || !channelId) return;
+  await fetch(`https://discord.com/api/v10/channels/${channelId}/typing`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bot ${token}`, 'Content-Type': 'application/json' },
+  }).catch((err) => console.error('[container-runner] typing error:', err));
+}
 
 /** Send a text message directly to a Discord channel via REST API. */
 async function sendTextToDiscord(channelId: string, text: string): Promise<void> {

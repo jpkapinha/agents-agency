@@ -13,8 +13,10 @@
  */
 
 type Sender = (text: string) => Promise<void>;
+type TypingTrigger = () => Promise<void>;
 
 const registry = new Map<string, Sender>();
+const typingRegistry = new Map<string, TypingTrigger>();
 
 /** Called by container-runner.ts once per channel at startup. */
 export function registerChannelSend(channelId: string, send: Sender): void {
@@ -27,4 +29,18 @@ export function registerChannelSend(channelId: string, send: Sender): void {
  */
 export function channelSend(channelId: string, text: string): Promise<void> {
   return registry.get(channelId)?.(text) ?? Promise.resolve();
+}
+
+/** Called by container-runner.ts to register the Discord typing trigger for a channel. */
+export function registerChannelTyping(channelId: string, trigger: TypingTrigger): void {
+  typingRegistry.set(channelId, trigger);
+}
+
+/**
+ * Fire a Discord "is typing..." indicator for a channel.
+ * The indicator lasts ~10 seconds; call every ≤8 seconds to keep it showing.
+ * Falls back silently if no trigger is registered.
+ */
+export function triggerTyping(channelId: string): Promise<void> {
+  return typingRegistry.get(channelId)?.() ?? Promise.resolve();
 }
