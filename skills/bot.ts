@@ -338,6 +338,8 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
     e. Once approved: update \`prd.md\` and \`backlog.md\` to reflect the new direction, then dispatch the minimal set of agents needed to implement the changes — referencing the change plan in each task description.
     f. Call \`update_memory\` to record the pivot decision.
 20. **Model team (profiles):** You work with configurable teams of AI models. The default is **testing** (all kimi-k2.5, cheap). Use \`get_model_profiles\` to list options and \`switch_model_profile\` to change. The active profile persists across sessions. When the client says "switch to production", "use better models", "switch to testing", etc. — call \`switch_model_profile\` immediately.
+21. **Project GitHub repository:** After the PRD is approved and before dispatching development agents, check \`get_state\` for existing repos. If none exist, call \`setup_project_repo\`: ask the client for the repo name and whether to use their personal GitHub account or an organisation (mention that \`GITHUB_ORG\` is set to \`${process.env['GITHUB_ORG'] ?? 'not set'}\` if relevant). This creates the repo, pushes all workspace files to \`main\`, and registers it in project state.
+22. **Milestone PRs:** After QA passes on a significant deliverable (contracts written, frontend complete, etc.), call \`push_milestone\` to commit all workspace changes, push to a named branch, and open a GitHub PR for the client to review. The client merges manually. Use descriptive branch names like \`feat/smart-contracts\` or \`milestone/mvp\`. Include a clear PR body explaining what was done and what to review.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -653,6 +655,42 @@ const UPDATE_ARTIFACT_TOOL = {
   },
 };
 
+const SETUP_PROJECT_REPO_TOOL = {
+  type: 'function',
+  function: {
+    name: 'setup_project_repo',
+    description: 'Create a new GitHub repository and push the entire project workspace to it. Call this after PRD approval when no project repo exists yet. Ask the client for the repo name and whether to use their personal GitHub account or an organisation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        repo_name: { type: 'string', description: 'Name for the new GitHub repository, e.g. "my-web3-project"' },
+        owner: { type: 'string', description: 'GitHub username or organisation name. Leave empty to use the authenticated user\'s personal account.' },
+        private: { type: 'boolean', description: 'Whether the repo should be private (default: true)' },
+        description: { type: 'string', description: 'Short description shown on the GitHub repo page' },
+      },
+      required: ['repo_name'],
+    },
+  },
+};
+
+const PUSH_MILESTONE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'push_milestone',
+    description: 'Commit all current workspace changes to a new branch and open a GitHub Pull Request for the client to review. Call this after QA passes on significant deliverables.',
+    parameters: {
+      type: 'object',
+      properties: {
+        branch: { type: 'string', description: 'Branch name, e.g. "feat/smart-contracts" or "milestone/mvp"' },
+        commit_message: { type: 'string', description: 'Git commit message describing the changes' },
+        pr_title: { type: 'string', description: 'Pull request title' },
+        pr_body: { type: 'string', description: 'Pull request body — describe what was done, what was tested, and what to review' },
+      },
+      required: ['branch', 'commit_message', 'pr_title', 'pr_body'],
+    },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -673,6 +711,8 @@ const PM_TOOLS = [
   LIST_ARTIFACTS_TOOL,
   READ_ARTIFACT_TOOL,
   UPDATE_ARTIFACT_TOOL,
+  SETUP_PROJECT_REPO_TOOL,
+  PUSH_MILESTONE_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1340,6 +1380,172 @@ async function dispatchPMTool(
         .map(([role, model]) => `• ${role}: ${model.replace(/^openrouter\//, '').split('/').pop()}`)
         .join('\n');
       return `✅ Switched to **${profile}** — ${found.description}\n\n${roleLines}\n\nThis setting persists across sessions.`;
+    }
+
+    case 'setup_project_repo': {
+      const repoName = (args['repo_name'] as string).replace(/[^a-zA-Z0-9._-]/g, '-');
+      const isPrivate = (args['private'] as boolean | undefined) ?? true;
+      const repoDescription = (args['description'] as string | undefined) ?? '';
+
+      // Resolve owner — default to authenticated GitHub user
+      let owner = (args['owner'] as string | undefined)?.trim();
+      if (!owner) {
+        const whoami = runCommand('gh api user --jq .login 2>&1', 15_000);
+        if (whoami.exitCode !== 0) return `Failed to get GitHub user: ${whoami.stderr || whoami.stdout}`;
+        owner = whoami.stdout.trim();
+      }
+
+      const fullName = `${owner}/${repoName}`;
+      const visibility = isPrivate ? '--private' : '--public';
+      const descFlag = repoDescription
+        ? `--description "${repoDescription.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+        : '';
+
+      // Create the repo on GitHub
+      const createResult = runCommand(
+        `gh repo create "${fullName}" ${visibility} ${descFlag} 2>&1`,
+        30_000,
+      );
+      if (createResult.exitCode !== 0 && !createResult.stdout.includes('already exists')) {
+        return `Failed to create GitHub repo:\n${createResult.stderr || createResult.stdout}`;
+      }
+
+      const repoUrl = `https://github.com/${fullName}`;
+      const token = process.env['GITHUB_TOKEN'] ?? '';
+
+      // Init git in /workspace if not already a repo
+      const isGitRepo = runCommand('git -C /workspace rev-parse --git-dir 2>/dev/null', 5_000);
+      if (isGitRepo.exitCode !== 0) {
+        runCommand('git -C /workspace init -b main 2>&1', 10_000);
+      }
+
+      // Write a default .gitignore if one doesn't exist
+      const gitignorePath = '/workspace/.gitignore';
+      if (!existsSync(gitignorePath)) {
+        writeFileSync(gitignorePath, [
+          'node_modules/',
+          '.env',
+          '.env.*',
+          '!.env.example',
+          '*.log',
+          '*.tmp',
+          '.DS_Store',
+          'dist/',
+          'build/',
+          'cache/',
+          'out/',
+          '.foundry/',
+          '.agency/history-*.json',
+          '.agency/costs.json',
+          '.agency/uploads/',
+          '.agency/state.json.tmp',
+        ].join('\n') + '\n', 'utf-8');
+      }
+
+      // Configure git identity
+      runCommand('git -C /workspace config user.email "andy@agency.ai" 2>/dev/null || true', 5_000);
+      runCommand('git -C /workspace config user.name "Andy (Agency PM)" 2>/dev/null || true', 5_000);
+
+      // Set remote (replace existing origin if any)
+      runCommand('git -C /workspace remote remove origin 2>/dev/null || true', 5_000);
+      const remoteUrl = `https://x-access-token:${token}@github.com/${fullName}.git`;
+      const addRemote = runCommand(
+        `git -C /workspace remote add origin "${remoteUrl}" 2>&1`,
+        10_000,
+      );
+      if (addRemote.exitCode !== 0) {
+        return `Failed to set remote:\n${addRemote.stderr || addRemote.stdout}`;
+      }
+
+      // Stage everything
+      runCommand('git -C /workspace add -A 2>&1', 30_000);
+
+      // Commit only if there are staged changes
+      const hasChanges = runCommand('git -C /workspace status --porcelain 2>&1', 5_000);
+      if (hasChanges.stdout.trim()) {
+        const commitResult = runCommand(
+          'git -C /workspace commit -m "Initial project setup" 2>&1',
+          30_000,
+        );
+        if (commitResult.exitCode !== 0) {
+          return `Failed to create initial commit:\n${commitResult.stderr || commitResult.stdout}`;
+        }
+      }
+
+      // Push to main
+      const pushResult = runCommand('git -C /workspace push -u origin main 2>&1', 60_000);
+      if (pushResult.exitCode !== 0) {
+        return `Failed to push to GitHub:\n${pushResult.stderr || pushResult.stdout}`;
+      }
+
+      addRepo(repoUrl, repoName, 'main');
+      return `✅ Project repo created: ${repoUrl}\nAll workspace files pushed to \`main\`. Use \`push_milestone\` to open PRs at each milestone.`;
+    }
+
+    case 'push_milestone': {
+      const branch = (args['branch'] as string).replace(/[^a-zA-Z0-9._/-]/g, '-');
+      const commitMessage = args['commit_message'] as string;
+      const prTitle = args['pr_title'] as string;
+      const prBody = args['pr_body'] as string;
+
+      // Verify remote is configured
+      const remoteCheck = runCommand('git -C /workspace remote get-url origin 2>&1', 5_000);
+      if (remoteCheck.exitCode !== 0) {
+        return 'No git remote configured for /workspace. Call setup_project_repo first.';
+      }
+
+      // Make sure we have the latest main
+      runCommand('git -C /workspace fetch origin main 2>&1', 30_000);
+      runCommand('git -C /workspace checkout main 2>&1', 10_000);
+
+      // Create branch (or switch to it if it already exists)
+      const branchResult = runCommand(
+        `git -C /workspace checkout -b "${branch}" 2>&1 || git -C /workspace checkout "${branch}" 2>&1`,
+        10_000,
+      );
+      if (branchResult.exitCode !== 0) {
+        return `Failed to create/switch to branch "${branch}":\n${branchResult.stderr || branchResult.stdout}`;
+      }
+
+      // Stage all changes
+      runCommand('git -C /workspace add -A 2>&1', 30_000);
+
+      const hasChanges = runCommand('git -C /workspace status --porcelain 2>&1', 5_000);
+      if (!hasChanges.stdout.trim()) {
+        return 'No changes to commit — workspace is up to date with the last push.';
+      }
+
+      // Commit
+      const safeMsg = commitMessage.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ');
+      const commitResult = runCommand(
+        `git -C /workspace commit -m "${safeMsg}" 2>&1`,
+        30_000,
+      );
+      if (commitResult.exitCode !== 0) {
+        return `Failed to commit:\n${commitResult.stderr || commitResult.stdout}`;
+      }
+
+      // Push branch
+      const pushResult = runCommand(
+        `git -C /workspace push -u origin "${branch}" 2>&1`,
+        60_000,
+      );
+      if (pushResult.exitCode !== 0) {
+        return `Failed to push branch "${branch}":\n${pushResult.stderr || pushResult.stdout}`;
+      }
+
+      // Open PR
+      const safeTitle = prTitle.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const prResult = runCommand(
+        `gh -C /workspace pr create --title "${safeTitle}" --body "${prBody.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}" --base main 2>&1`,
+        30_000,
+      );
+      if (prResult.exitCode !== 0) {
+        return `Branch "${branch}" pushed but PR creation failed:\n${prResult.stderr || prResult.stdout}\n\nCreate the PR manually at: ${remoteCheck.stdout.trim().replace(/x-access-token:[^@]+@/, '')}`;
+      }
+
+      const prUrl = prResult.stdout.trim().split('\n').pop() ?? '';
+      return `✅ Milestone pushed!\n**Branch:** ${branch}\n**PR:** ${prUrl}\n\nShare the PR link with the client for review. Merge manually when ready.`;
     }
 
     default:
