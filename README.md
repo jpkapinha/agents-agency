@@ -13,9 +13,9 @@
 
 A **GitHub Template** that gives you a complete autonomous Web3 development agency in one `docker compose up`.
 
-You talk to **Andy**, the Project Manager, via Discord. Andy understands your requirements, turns them into a structured PRD for your approval, then delegates to specialist agents who write code, run tests, and deliver results — all without you micromanaging a single step.
+You talk to **Andy**, the Project Manager, via Discord. Andy understands your requirements, turns them into a structured PRD for your approval, then delegates to specialist agents who write code, run tests, verify deliverables, and deliver results — all without you micromanaging a single step.
 
-Andy's team writes Solidity contracts, runs Foundry tests, builds React frontends, sets up CI/CD, audits for security risks, and opens pull requests. Each task is tracked on a live project board. After every build, the Tech Lead automatically runs the test suite and reports back. Every token spent is tracked and visible.
+Andy's team writes Solidity contracts, runs Foundry tests, builds React frontends, sets up CI/CD, audits for security risks, and opens pull requests. Each task is tracked on a live board. After every build, a dedicated QA Verifier independently checks that files actually exist, then Tech Lead runs the test suite. Every token spent is tracked and visible.
 
 ---
 
@@ -24,21 +24,19 @@ Andy's team writes Solidity contracts, runs Foundry tests, builds React frontend
 ```
 You (Discord) ──► Andy (PM)
                     │
-                    ├── create_prd        → structured PRD, sent to you for APPROVED
-                    ├── consult_agent → Solidity Dev    (writes code, runs forge test, iterates)
-                    ├── consult_agent → Tech Lead        (architecture + auto test gate after builds)
-                    ├── consult_agent → Frontend Dev     (React/Next.js components)
-                    ├── consult_agent → Backend Dev      (APIs, indexers, databases)
-                    ├── consult_agent → DevOps           (Docker, CI/CD, deployments)
-                    ├── consult_agent → Risk Manager     (security audit, runs slither/solhint)
-                    ├── consult_agent → Solutions Arch   (system design, validates with builds)
+                    ├── create_prd         → structured PRD + backlog, sent for APPROVED
+                    ├── consult_agent → Solidity Dev      (writes, forge test, iterates — up to 120 rounds)
+                    ├── consult_agent → Tech Lead          (architecture + auto test gate after builds)
+                    ├── consult_agent → Frontend Dev       (React/Next.js components)
+                    ├── consult_agent → Backend Dev        (APIs, indexers, databases)
+                    ├── consult_agent → DevOps             (Docker, CI/CD, deployments)
+                    ├── consult_agent → Risk Manager       (security audit, runs slither/solhint)
+                    ├── consult_agent → Solutions Arch     (system design, validates with builds)
+                    ├── consult_agent → QA Verifier        (auto-runs after every agent — verifies files exist)
                     └── hire_specialist → 187 external roles (UX, legal, data science, ...)
-                                           └── writes report to /workspace/.agency/reports/
 ```
 
-Each specialist runs an **agentic loop** (up to 20 rounds): reads files, writes code, runs commands, fixes errors — until the task is done or it needs a decision from you.
-
-Andy keeps you informed with progress updates in Discord, reports token usage and cost after each task, and asks for your input only when a real decision is needed.
+Each specialist runs an **agentic loop** (up to 40 rounds per segment × 3 auto-continuation segments = **120 effective rounds**): reads files, writes code, runs commands, fixes errors — until the task is done or it needs a decision from you. Agents work in the background; Andy stays responsive throughout.
 
 ---
 
@@ -46,19 +44,23 @@ Andy keeps you informed with progress updates in Discord, reports token usage an
 
 | Feature | Details |
 |---|---|
-| **PRD approval gate** | Andy generates a structured PRD before any dev work and waits for your APPROVED |
-| **Automatic task board** | Every specialist task is logged as pending → in-progress → done/blocked in real time |
-| **Test gate** | After every builder task, Tech Lead automatically runs the test suite and reports PASS/FAIL |
+| **PRD + artifact approval gate** | Andy generates a PRD and backlog before any dev work; waits for APPROVED |
+| **Shared artifacts folder** | All project docs live in `project-data/.agency/artifacts/` — edit with any text editor, Andy reads your changes before dispatching agents |
+| **Pivot / realign flow** | Mid-development change requests trigger a structured change plan (editable), client approval, then targeted re-dispatch |
+| **QA Verifier** | Independent read-only agent that runs after every task and verifies files actually exist and aren't stubs; auto-retries the agent once if anything is missing |
+| **Agent auto-continuation** | Agents auto-resume across up to 3 segments (120 effective rounds) without human intervention — complex tasks complete fully |
+| **Background execution** | Agents run fully in the background; Andy stays conversational and responsive while work happens |
+| **Automatic test gate** | After every builder task, Tech Lead runs the test suite and reports PASS / FAIL / NEEDS-TESTS |
+| **Model profiles** | Switch between `testing` (all kimi-k2.5, near-zero cost) and `production` (Opus/Sonnet per role) at any time; choice persists across restarts |
 | **Cost tracking** | Token count + estimated USD shown after each task; ask Andy "how much have we spent?" |
-| **Persistent memory** | Andy remembers tech stack choices, key decisions, and milestones across Docker restarts |
+| **Persistent memory** | Andy remembers tech stack, key decisions, and milestones across Docker restarts |
 | Autonomous execution | Agents write code, run tests, iterate, and fix errors without hand-holding |
-| Discord interface | Talk to Andy naturally — share PDFs, images, Google Drive links, GitHub repos, code snippets |
+| Discord interface | Talk to Andy naturally — no @mention needed; share PDFs, images, Google Drive links, GitHub repos |
 | Artifact delivery | Andy sends files (MD, PDF, specs, reports) as Discord attachments |
 | GitHub integration | Andy clones repos, agents push code, open PRs via `gh` |
 | Multiple repos | Track several GitHub repos per project; agents work across all of them |
 | 187 specialists | Full agency-agents roster: UX, legal, marketing, data science, and more |
 | Web3 toolchain | Foundry (forge, cast, anvil, chisel) + Hardhat pre-installed |
-| Cost-optimized routing | kimi-k2.5 for routine roles, Claude for precision roles — configurable in `config/models.json` |
 | GitHub Actions CI | Auto-builds and pushes to `ghcr.io` on every push to `master` |
 
 ---
@@ -98,22 +100,18 @@ docker compose up -d
 docker compose logs -f
 ```
 
-Andy will connect to Discord within ~30 seconds. You'll see:
-
-```
-[bot] Discord connected as YourBot#1234
-[bot] PM channel ready: #your-channel
-```
+Andy will connect to Discord within ~30 seconds. The default model team is **testing** (all kimi-k2.5). Say "switch to production" at any time to upgrade.
 
 ### 4 — Talk to Andy
 
-In your Discord PM channel:
+Just write in your Discord PM channel — no @mention needed:
 
 ```
-@Andy hello, what can you do?
-@Andy add the repo https://github.com/myorg/my-contracts
-@Andy build an ERC-20 staking contract with a 30-day lockup period
-@Andy run a security audit on the staking contract and send me the report
+hello, what can you do?
+add the repo https://github.com/myorg/my-contracts
+build an ERC-20 staking contract with a 30-day lockup period
+run a security audit on the staking contract and send me the report
+switch to production models
 ```
 
 ---
@@ -134,8 +132,8 @@ In your Discord PM channel:
 
 | Variable | Default | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | _(none)_ | GitHub personal access token. Required for private repo clones, `git push`, and `gh pr create`. Needs `repo` + `workflow` scopes. Create at [github.com/settings/tokens](https://github.com/settings/tokens) |
-| `GITHUB_ORG` | `jpkapinha` | Your GitHub org/username, used in log messages |
+| `GITHUB_TOKEN` | _(none)_ | GitHub personal access token. Required for private repo clones, `git push`, and `gh pr create`. Needs `repo` + `workflow` scopes |
+| `GITHUB_ORG` | `jpkapinha` | Your GitHub org/username |
 | `COST_WARNING_THRESHOLD_USD` | `5` | Discord alert when session spend exceeds this amount |
 | `WEB3_SKILLS_REPO` | _(none)_ | SSH URL for a private web3-skills repo (see [Private Skills](#optional-private-web3-skills)) |
 | `WEB3_SKILLS_BRANCH` | `main` | Branch to clone from the web3-skills repo |
@@ -152,129 +150,165 @@ In your Discord PM channel:
 6. Right-click your PM channel → **Copy Channel ID** → set `DISCORD_PM_CHANNEL_ID`
 7. Right-click your server icon → **Copy Server ID** → set `DISCORD_GUILD_ID`
 
-Andy responds to `@mention` or messages starting with `@andy`.
+Andy responds to every message in the PM channel — no @mention required.
 
 ---
 
 ## Talking to Andy
 
-### Starting a project — PRD first
+### Starting a project — PRD and artifact review first
 
-Before writing a single line of code, Andy generates a structured PRD and sends it to you for approval:
+Before writing a single line of code, Andy creates a PRD and backlog and puts them in the shared artifacts folder for you to review and edit:
 
 ```
-You:  @Andy build a staking protocol where users stake ETH and earn daily rewards
+You:  build a staking protocol where users stake ETH and earn daily rewards
 
-Andy: 📋 PRD ready for review [uploads prd.md as Discord attachment]
+Andy: 📋 PRD ready for review [uploads prd.md]
+
+      Your files are in project-data/.agency/artifacts/ — open them in any editor.
+      • prd.md — Product Requirements Document
+      • backlog.md — Prioritised user stories
 
       **Decision needed:**
-      Please review the PRD. Type APPROVED when ready to start development,
-      or tell me what to change.
+      Review and edit both files, then type APPROVED to start development.
 
 You:  APPROVED
 
 Andy: On it — involving Solidity Dev and Risk Manager.
-      🔧 Solidity Developer — Write staking contract with daily reward accrual...
-      ⚙️ Solidity Developer [3] run_command `forge build`
+      🔧 Solidity Developer — Write staking contract...
       ⚙️ Solidity Developer [7] run_command `forge test`
       ✅ Solidity Developer — done (12,400 tokens, ~$0.04)
+      🔎 QA — verifying Solidity Developer's deliverables…
+      ✅ QA — VERIFIED: contracts/Staking.sol (312 lines), test/Staking.t.sol (94 lines)
       🔍 Tech Lead — verifying tests…
-      ✅ Tech Lead — PASS: 14/14 tests passing, no critical issues
+      ✅ Tech Lead — PASS: 14/14 tests passing
 ```
 
-### Sharing files with Andy
+### Background execution — Andy stays responsive
 
-Andy handles everything a human colleague would send you:
-
-```
-You:  @Andy [attaches requirements.pdf]
-Andy: (reads PDF, summarises it, asks if you want a PRD)
-
-You:  @Andy here's the spec https://docs.google.com/...
-Andy: (fetches the Google Doc, reads it, proceeds)
-
-You:  @Andy [attaches screenshot of UI mockup]
-Andy: (describes what he sees, asks relevant questions)
-```
-
-### Checking project status and costs
+Agents run in the background. You can chat with Andy while work happens:
 
 ```
-You:  @Andy what's the status?
+Andy: 🔧 Solidity Developer — writing staking contract... (background)
+
+You:  what's the status?
+Andy: Solidity Dev has been running for 2m 14s on the staking contract.
+      You can keep chatting — I'll post updates as they finish.
+
+You:  remind me what we decided about the proxy pattern
+Andy: We're using UUPS proxies — decided on 2024-01-15 per your instruction.
+
+... (a minute later) ...
+Andy: ✅ Solidity Developer — done (12,400 tokens, ~$0.04)
+```
+
+### Artifact collaboration — edit files before development starts
+
+All project documents live in `project-data/.agency/artifacts/` on your machine. Open them in any editor. Andy reads the latest version before dispatching each phase:
+
+```
+You:  show me our documents
+Andy: **Project artifacts** (edit locally at project-data/.agency/artifacts/):
+      • prd.md — Product Requirements Document (4.2 KB, last modified 2024-01-15 14:30)
+      • backlog.md — Product backlog (2.1 KB, last modified 2024-01-15 14:35)
+      • architecture.md — System architecture decisions (1.8 KB)
+```
+
+### Pivot / mid-development changes
+
+Change your mind after development starts? Andy creates a structured change plan, gets your approval, then dispatches only the agents needed for the delta:
+
+```
+You:  actually, let's use ERC-4626 vault standard instead of the custom staking logic
+
+Andy: Got it. Reading current PRD and backlog...
+      [uploads change-plan.md]
+
+      **Decision needed:**
+      Review the change plan at project-data/.agency/artifacts/change-plan.md.
+      Type APPROVED to proceed, or tell me what to adjust.
+
+You:  APPROVED
+
+Andy: Updating PRD and backlog, then redeploying Solidity Dev with the new spec...
+```
+
+### Model profiles — switch teams on the fly
+
+The default team is **testing** (all kimi-k2.5, near-zero cost). Switch to production when you need maximum capability:
+
+```
+You:  switch to production
+
+Andy: ✅ Switched to production — Best capability per role
+      • project-manager: kimi-k2.5
+      • tech-lead: claude-sonnet-4-5
+      • solutions-architect: claude-opus-4-5
+      • solidity-dev: claude-sonnet-4-5
+      • risk-manager: claude-opus-4-5
+      ...
+      This setting persists across sessions.
+
+You:  switch to testing
+Andy: ✅ Switched to testing — all roles using kimi-k2.5
+```
+
+### QA verification — no more hallucinated files
+
+After every agent completes, the QA Verifier independently checks that claimed files actually exist and have real content:
+
+```
+✅ Backend Developer — done (8,200 tokens, ~$0.01)
+🔎 QA — verifying Backend Developer's deliverables…
+⚠️ QA — issues found:
+   FAILED: /workspace/api/routes/staking.ts not found
+🔄 Backend Developer — retrying to fix QA issues…
+⚙️ [retry] write_file → /workspace/api/routes/staking.ts
+🔎 QA — re-verifying after retry…
+✅ QA (re-check) — VERIFIED: api/routes/staking.ts (187 lines)
+```
+
+### Checking status and costs
+
+```
+You:  what's the status?
 Andy: (calls get_state, lists tasks done/in-progress/blocked)
 
-You:  @Andy how much have we spent so far?
+You:  how much have we spent?
 Andy: **Cost summary** (8 tasks, 94,300 tokens total, ~$0.38 estimated):
       • Write staking contract — kimi-k2.5 — 12,400 tokens — ~$0.04
-      • Verify tests — claude-4.6-sonnet — 8,200 tokens — ~$0.12
+      • Security audit — claude-opus-4-5 — 31,200 tokens — ~$0.24
       ...
-```
-
-### Receiving documents and artifacts
-
-```
-You:  @Andy write an architecture overview and send it as a PDF
-Andy: [uploads architecture.pdf as Discord attachment]
-
-You:  @Andy hire a UX designer to review the user flows
-Andy: 🔍 Hiring UX designer…
-      ✅ UX Designer — done
-      (report saved to /workspace/.agency/reports/ux-designer-1234567890.md)
-```
-
-### Decisions
-
-Andy asks for your input only when genuinely needed:
-
-```
-Andy: **Decision needed:**
-      Reentrancy found in withdraw(). How should we fix it?
-
-      Options:
-      1. Add nonReentrant guard (OpenZeppelin)
-      2. Redesign withdraw flow (checks-effects-interactions)
-      3. Deprioritise — flag for audit
-
-You:  1
-Andy: On it — applying nonReentrant guard...
-```
-
-### Project memory across sessions
-
-Andy remembers key decisions even after Docker restarts:
-
-```
-You:  @Andy remember we're using UUPS proxies and wagmi v2
-
-Andy: (calls update_memory — stored permanently)
-
-... (weeks later, after docker compose down && up) ...
-
-You:  @Andy what's our tech stack?
-Andy: Solidity 0.8.24, UUPS proxies, Next.js 14, wagmi v2 — as decided on [date].
 ```
 
 ---
 
-## Model Routing
+## Model Profiles
 
-Configure which model each role uses in `config/models.json`. No code changes needed.
+Configure which model each role uses in `config/models.json`. Switch profiles at any time in Discord — the choice persists across Docker restarts.
 
-| Role | Default Model | Reasoning |
+### testing (default)
+
+All roles use `moonshotai/kimi-k2.5`. Near-zero cost. Good for iterating on flows, testing the agency itself, and early-stage exploration.
+
+### production
+
+| Role | Model | Reasoning |
 |---|---|---|
-| Project Manager | `moonshotai/kimi-k2.5` | Cost-efficient orchestration |
-| Product Manager | `moonshotai/kimi-k2.5` | Requirements and roadmap |
-| Frontend Dev | `moonshotai/kimi-k2.5` | UI component generation |
-| DevOps | `moonshotai/kimi-k2.5` | Infrastructure config |
-| Tech Lead | `anthropic/claude-4.6-sonnet` | Code review + test execution |
-| Backend Dev | `anthropic/claude-4.6-sonnet` | APIs and services |
-| Solidity Dev | `anthropic/claude-4.6-sonnet` | Smart contract precision |
-| Solutions Architect | `anthropic/claude-4.6-opus` | Architecture requires deep thinking |
-| Risk Manager | `anthropic/claude-4.6-opus` | Security is high-stakes |
+| Project Manager | `kimi-k2.5` | Cost-efficient orchestration |
+| Product Manager | `kimi-k2.5` | Requirements and roadmap |
+| Frontend Dev | `kimi-k2.5` | UI component generation |
+| DevOps | `kimi-k2.5` | Infrastructure config |
+| QA Verifier | `kimi-k2.5` | Read-only file checks |
+| Tech Lead | `claude-sonnet-4-5` | Code review + test execution |
+| Backend Dev | `claude-sonnet-4-5` | APIs and services |
+| Solidity Dev | `claude-sonnet-4-5` | Smart contract precision |
+| Solutions Architect | `claude-opus-4-5` | Architecture requires deep thinking |
+| Risk Manager | `claude-opus-4-5` | Security is high-stakes |
 
 All models route through [OpenRouter](https://openrouter.ai/) — one key, all providers.
 
-> **Cost tip**: kimi-k2.5 is ~20x cheaper than Claude Sonnet for routine tasks with no quality loss. Opus is reserved only for decisions where it matters.
+> **Adding profiles:** Edit `config/models.json` to add your own named profiles. Rebuild Docker to apply.
 
 ---
 
@@ -287,20 +321,26 @@ agents-agency/
 ├── versions.lock                 # Pinned versions for agency-agents
 ├── .env.example                  # Copy to .env and fill in
 ├── config/
-│   └── models.json               # Model routing per agent role
+│   └── models.json               # Model profiles: testing + production (add your own)
 ├── setup/
 │   ├── entrypoint.sh             # Bootstrap: agency-agents → git config → launch bot
 │   ├── install-agency-agents.sh  # Clones msitarzewski/agency-agents (187 roles)
 │   ├── load-web3-skills.sh       # Optional: SSH-clones private web3-skills repo
 │   └── customize-pm.sh           # Validates Discord token format
 ├── skills/
-│   ├── bot.ts                    # Andy: PM loop, tool dispatch, PRD gate, cost tracking
-│   ├── agents.ts                 # Core team + external specialist definitions and runner
+│   ├── bot.ts                    # Andy: PM loop, tool dispatch, artifact workflow, cost tracking
+│   ├── agents.ts                 # Core team + external specialists, auto-continuation loop
+│   ├── channel-send.ts           # Background message sender (abort-independent)
 │   ├── tools.ts                  # Agent tools: read/write files, run commands, git, read_pdf
-│   ├── state.ts                  # Project state: tasks, decisions, blockers, repos, memory
+│   ├── state.ts                  # Project state: tasks, decisions, repos, memory, active profile
 │   └── package.json              # discord.js + tsx
 ├── project-data/                 # Your project's workspace (mounted at /workspace)
-│   └── .agency/                  # Auto-created: state, history, PRD, costs, uploads
+│   └── .agency/
+│       ├── artifacts/            # Shared docs — edit locally, Andy reads before each phase
+│       ├── state.json            # Persistent state including active model profile
+│       ├── costs.json            # Per-task token usage and estimated USD
+│       ├── history-*.json        # Andy's conversation history per channel
+│       └── uploads/              # PDFs and files attached in Discord
 └── secrets/                      # Place git_deploy_key here for private skills (gitignored)
 ```
 
@@ -310,63 +350,85 @@ Everything in `project-data/` (mounted as `/workspace`) survives container resta
 
 | Path | Contents |
 |---|---|
-| `/workspace/.agency/state.json` | Tasks, decisions, blockers, registered repos, project memory |
-| `/workspace/.agency/history-{channelId}.json` | Andy's conversation history per channel (last 40 messages) |
-| `/workspace/.agency/prd.md` | Latest PRD generated by Andy |
+| `/workspace/.agency/state.json` | Tasks, decisions, blockers, repos, project memory, active model profile |
+| `/workspace/.agency/artifacts/` | Shared project documents — PRD, backlog, tasks, architecture, change plans |
+| `/workspace/.agency/history-{channelId}.json` | Andy's conversation history (last 40 messages) |
 | `/workspace/.agency/costs.json` | Per-task token usage and estimated USD cost log |
-| `/workspace/.agency/uploads/` | PDFs and files attached by you in Discord |
-| `/workspace/.agency/reports/` | Analysis reports written by hired external specialists |
+| `/workspace/.agency/uploads/` | PDFs and files attached in Discord |
 | `/workspace/{repo-name}/` | Cloned GitHub repositories |
-| `/workspace/` | All files agents write (contracts, components, docs, etc.) |
+| `/workspace/` | All files agents write (contracts, components, APIs, docs) |
 
 ---
 
 ## Agent Capabilities
 
-### Tool access per role
+### Core team roles
 
-| Tool | Builder roles | Advisor roles | External specialists |
-|---|---|---|---|
-| `read_file` | ✅ | ✅ | ✅ |
-| `read_pdf` | ✅ | ✅ | — |
-| `write_file` | ✅ | ✅ (Arch) | ✅ (reports only) |
-| `list_files` | ✅ | ✅ | ✅ |
-| `run_command` | ✅ | ✅ | — |
-| `git_status` / `git_diff` | DevOps only | — | — |
-| `git_commit` | DevOps only (with `[COMMIT APPROVED]`) | — | — |
+| Role | Specialty | Tools |
+|---|---|---|
+| **Solidity Developer** | EVM contracts, DeFi, token standards, Foundry testing | read/write/run |
+| **Frontend Developer** | React, Next.js, wagmi/viem, wallet UX, Tailwind | read/write/run |
+| **Backend Developer** | Node.js APIs, event indexers, PostgreSQL/Redis, IPFS | read/write/run |
+| **DevOps** | Docker, GitHub Actions, deployment scripts, monitoring | read/write/run + git |
+| **Tech Lead** | Architecture review, test execution, code quality | read/run |
+| **Solutions Architect** | End-to-end system design, on-chain + off-chain | read/write/run |
+| **Risk Manager** | Security analysis, slither/solhint, threat modelling | read/run |
+| **QA Verifier** | Verifies files exist and have real content after every task | read only |
 
-**Builder roles** (write + execute): `solidity-dev`, `frontend-dev`, `backend-dev`, `devops`
+### Auto-continuation (120 effective rounds)
 
-**Advisor roles** (read + execute, no write except Arch): `tech-lead`, `solutions-architect`, `risk-manager`
-- Tech Lead runs `forge test`, `npm test`, `tsc --noEmit` to verify work
-- Risk Manager runs `slither`, `solhint`, `npm audit` for static analysis
-- Solutions Architect runs builds to validate architecture decisions
+Complex tasks like writing a full contract suite, setting up a multi-service backend, or debugging a failing test cycle can exceed the old 20-round limit. The agentic loop now runs up to **40 rounds per segment across 3 segments**. When a segment ends without task completion, the agent is automatically given a continuation prompt listing what it already did and resumes where it left off — no manual intervention needed.
 
-**External specialists** (read + write reports): hired by Andy via `hire_specialist`. Output persisted to `/workspace/.agency/reports/`.
+```
+⚙️ Solidity Developer [40] run_command `forge test`
+↩️ Solidity Developer — auto-continuing (segment 2/3)
+⚙️ Solidity Developer [41] write_file → contracts/StakingV2.sol
+...
+✅ Solidity Developer — done (87 rounds, 2 segments)
+```
+
+### QA Verifier — independent file verification
+
+The QA Verifier runs automatically after **every** agent task, regardless of role. It is read-only (cannot write or run commands) and checks independently whether the files the agent claimed to create actually exist and have real content.
+
+**Verdicts:**
+- `VERIFIED:` — all claimed files confirmed with real content ✅
+- `PARTIAL:` — some files exist, some missing → agent is retried once
+- `FAILED:` — no deliverables found → agent is retried once
+- `SKIPPED:` — analytical task, no files expected
+
+If QA finds issues, the original agent is retried once with the specific QA feedback. QA runs again after the retry and reports the final result.
 
 ### Automatic test gate
 
-After every `solidity-dev`, `frontend-dev`, or `backend-dev` task completes, Andy automatically dispatches **Tech Lead** to:
+After every `solidity-dev`, `frontend-dev`, or `backend-dev` task (and after QA passes), Andy automatically dispatches **Tech Lead** to:
 1. Identify what was built
 2. Run the appropriate test suite (`forge test` / `npm test` / `tsc --noEmit`)
 3. Return a verdict: **PASS** / **FAIL** / **NEEDS-TESTS**
 
-If tests fail, the result is reported back with specific failures so you can decide whether to fix immediately or continue.
+### Tool access per role
 
-### What agents produce
-
-- Smart contracts (`forge build`, `forge test`)
-- Frontend components (React, Next.js, Tailwind)
-- Backend services (Node.js, TypeScript, APIs)
-- Infrastructure config (Docker, GitHub Actions)
-- Architecture documents (`/workspace/.agency/architecture.md`)
-- PDF reports (`pandoc doc.md -o doc.pdf`)
-- GitHub pull requests (`gh pr create`)
-- PRDs and specs (`/workspace/.agency/prd.md`)
+| Tool | Builder roles | Advisor roles | QA Verifier | External specialists |
+|---|---|---|---|---|
+| `read_file` | ✅ | ✅ | ✅ | ✅ |
+| `read_pdf` | ✅ | ✅ | — | — |
+| `write_file` | ✅ | ✅ (Arch) | — | ✅ (reports) |
+| `list_files` | ✅ | ✅ | ✅ | ✅ |
+| `run_command` | ✅ | ✅ | — | — |
+| `git_commit` | DevOps only (`[COMMIT APPROVED]`) | — | — | — |
 
 ---
 
 ## Cost Control
+
+### Model profiles
+
+The fastest way to control cost: use `testing` profile (all kimi-k2.5) for exploration and switch to `production` only when you need maximum quality.
+
+```
+testing  → ~$0.001–0.005 per task (kimi-k2.5 everywhere)
+production → ~$0.01–0.30 per task depending on role (Opus for arch/risk, Sonnet for builders)
+```
 
 ### Per-task visibility
 
@@ -377,26 +439,16 @@ After every specialist completes a task:
 
 ### Session summary
 
-Ask Andy at any time:
 ```
-@Andy how much have we spent?
-```
+You:  how much have we spent?
 
-Andy calls `get_costs` and returns a breakdown:
-```
-Cost summary (8 tasks, 94,300 tokens total, ~$0.38 estimated):
-• Write staking contract — kimi-k2.5 — 12,400 tokens — <$0.01
-• Security audit — claude-4.6-opus — 31,200 tokens — ~$0.24
-...
+Andy: Cost summary (8 tasks, 94,300 tokens total, ~$0.38 estimated):
+      • Write staking contract — kimi-k2.5 — 12,400 tokens — <$0.01
+      • Security audit — claude-opus-4-5 — 31,200 tokens — ~$0.24
+      ...
 ```
 
 Costs are logged to `/workspace/.agency/costs.json` and persist across restarts.
-
-### Budget tips
-
-- Use `COST_WARNING_THRESHOLD_USD` in `.env` to get Discord alerts when session spend exceeds a threshold
-- Advisor roles (Tech Lead, Risk Manager) use Claude for quality — keep Solidity dev tasks focused to limit their rounds
-- kimi-k2.5 handles PM, Frontend, DevOps at a fraction of Claude's cost with no noticeable quality difference for those roles
 
 ---
 
@@ -404,12 +456,12 @@ Costs are logged to `/workspace/.agency/costs.json` and persist across restarts.
 
 Add `GITHUB_TOKEN` to your `.env` to enable:
 
-- **Private repo cloning** — `@Andy add the repo https://github.com/myorg/private-contracts`
+- **Private repo cloning** — `add the repo https://github.com/myorg/private-contracts`
 - **Git push** — agents push branches after completing work
-- **Pull request creation** — `run_command("gh pr create --title '...' --body '...'")` in devops tasks
+- **Pull request creation** — `run_command("gh pr create ...")` in devops tasks
 - **Authenticated API calls** — `gh` CLI is pre-installed and authenticated at startup
 
-The token is configured via git URL rewrite so it is **never exposed in child process environments** — agents run in a sanitised env and git auth is transparent.
+The token is configured via git URL rewrite so it is **never exposed in child process environments**.
 
 **Required scopes:** `repo`, `workflow`
 
@@ -426,15 +478,11 @@ docker compose up -d
 
 The `install-agency-agents.sh` script re-clones `msitarzewski/agency-agents` at every startup, so role definitions always stay current without a rebuild.
 
-To upgrade pinned versions, edit `versions.lock` and rebuild.
-
 ---
 
 ## Optional: Private Web3 Skills
 
-If you have a private patterns repository (good practices, coding standards, internal tooling docs), you can load it at startup via SSH deploy key.
-
-At startup, `load-web3-skills.sh` clones the repo and copies its `patterns/` subdirectory (or the full repo if no `patterns/` subdir exists) to `/app/patterns/` inside the container. All agents automatically receive a note about available patterns in their system prompt and can read them with `read_file("/app/patterns/<file>")` and `list_files("/app/patterns")`.
+Load a private patterns repository (coding standards, internal tooling docs, best practices) at startup via SSH deploy key. All agents automatically see a note about available patterns and can read them with `read_file("/app/patterns/<file>")`.
 
 ### 1. Generate a key pair
 
@@ -458,21 +506,8 @@ rm web3-skills-key web3-skills-key.pub
 
 ```env
 WEB3_SKILLS_REPO=git@github.com:yourorg/web3-skills.git
-WEB3_SKILLS_BRANCH=main   # optional, defaults to main
+WEB3_SKILLS_BRANCH=main
 ```
-
-The `secrets/` directory is gitignored — the key will never be committed.
-
----
-
-## Enabling as a GitHub Template
-
-After creating your fork:
-
-1. Go to **Settings → General**
-2. Check **"Template repository"**
-
-Your team can then click **"Use this template"** to spin up a new project instantly.
 
 ---
 
