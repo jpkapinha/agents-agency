@@ -67,6 +67,7 @@ export interface ProjectState {
   blockers: Blocker[];
   repos: Repo[];
   memory?: ProjectMemory;
+  activeModelProfile?: string; // e.g. "testing" | "production" — persists across restarts
 }
 
 // ---------------------------------------------------------------------------
@@ -276,5 +277,19 @@ export function updateMemory(updates: Partial<Omit<ProjectMemory, 'lastUpdated'>
   if (updates.outOfScope) memory.outOfScope = [...new Set([...memory.outOfScope, ...updates.outOfScope])];
   memory.lastUpdated = new Date().toISOString();
   state.memory = memory;
+  saveState(state);
+}
+
+// ---------------------------------------------------------------------------
+// Model profile helpers
+// ---------------------------------------------------------------------------
+
+export function getActiveProfile(): string | undefined {
+  return loadState().activeModelProfile;
+}
+
+export function setActiveProfile(name: string): void {
+  const state = loadState();
+  state.activeModelProfile = name;
   saveState(state);
 }

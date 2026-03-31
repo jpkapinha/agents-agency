@@ -243,22 +243,62 @@ export function findBestMatch(query: string, agents: ExternalAgentDef[]): Extern
 // Model loading
 // ---------------------------------------------------------------------------
 
-export function loadModelMap(configPath: string): Record<string, string> {
+// Shape of the new profile-based config (profiles.X.roles / profiles.X.default)
+// Also accepts the old flat format (roles / default) for backwards compatibility.
+interface ModelsConfig {
+  profiles?: Record<string, { description?: string; roles?: Record<string, string>; default?: string }>;
+  // legacy flat format
+  roles?: Record<string, string>;
+  default?: string;
+}
+
+function buildRoleMap(roles: Record<string, string>, defaultModel: string): Record<string, string> {
+  const strip = (s: string) => s.replace(/^openrouter\//, '');
+  const map: Record<string, string> = { '__default__': strip(defaultModel) };
+  for (const [role, model] of Object.entries(roles)) {
+    map[role] = strip(model);
+  }
+  return map;
+}
+
+export function loadModelMap(configPath: string, profileName?: string): Record<string, string> {
   const fallback = 'anthropic/claude-sonnet-4-5';
   try {
     const raw = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(raw) as { roles?: Record<string, string>; default?: string };
-    const map: Record<string, string> = {};
-    for (const [role, model] of Object.entries(config.roles ?? {})) {
-      map[role] = (model as string).replace(/^openrouter\//, '');
+    const config = JSON.parse(raw) as ModelsConfig;
+
+    // New profile-based format
+    if (config.profiles) {
+      const names = Object.keys(config.profiles);
+      const name = (profileName && config.profiles[profileName]) ? profileName : names[0];
+      const profile = config.profiles[name] ?? {};
+      console.log(`[agents] Model profile: ${name}`);
+      return buildRoleMap(profile.roles ?? {}, profile.default ?? fallback);
     }
-    map['__default__'] = (config.default ?? fallback).replace(/^openrouter\//, '');
-    return map;
+
+    // Legacy flat format
+    return buildRoleMap(config.roles ?? {}, config.default ?? fallback);
   } catch {
     console.warn('[agents] Could not load models.json — using defaults');
     const map: Record<string, string> = { '__default__': fallback };
     for (const agent of AGENTS) map[agent.role] = fallback;
     return map;
+  }
+}
+
+/** Returns the list of available profile names and their descriptions. */
+export function loadProfileNames(configPath: string): Array<{ name: string; description: string; roles: Record<string, string> }> {
+  try {
+    const raw = readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw) as ModelsConfig;
+    if (!config.profiles) return [];
+    return Object.entries(config.profiles).map(([name, p]) => ({
+      name,
+      description: p.description ?? name,
+      roles: p.roles ?? {},
+    }));
+  } catch {
+    return [];
   }
 }
 
