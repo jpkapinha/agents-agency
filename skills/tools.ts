@@ -227,11 +227,11 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Write or overwrite a file in the workspace. Creates parent directories automatically.',
+      description: 'Write or overwrite a file. Creates parent directories automatically. Path MUST be an absolute path starting with /workspace/ — never a bare filename or relative path.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Path relative to /workspace' },
+          path: { type: 'string', description: 'Absolute path starting with /workspace/, e.g. "/workspace/contracts/Token.sol"' },
           content: { type: 'string', description: 'Full file content to write' },
         },
         required: ['path', 'content'],
@@ -258,11 +258,11 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run a shell command in /workspace. Returns stdout, stderr, and exit code. Timeout: 60s default, max 300s.',
+      description: 'Run a shell command. Returns stdout, stderr, and exit code. Timeout: 60s default, max 300s. IMPORTANT: Always use full absolute paths starting with /workspace/ — never bare filenames or relative paths. Never use commas to separate multiple paths in a single command (use separate calls or proper bash syntax). Each call starts with a fresh shell — do not rely on cwd persisting between calls.',
       parameters: {
         type: 'object',
         properties: {
-          cmd: { type: 'string', description: 'Shell command to run, e.g. "forge test" or "npm install"' },
+          cmd: { type: 'string', description: 'Shell command using absolute paths, e.g. "forge test --root /workspace/contracts" or "npm --prefix /workspace/frontend install"' },
           timeout_ms: { type: 'number', description: 'Timeout in milliseconds (max 300000)' },
         },
         required: ['cmd'],
