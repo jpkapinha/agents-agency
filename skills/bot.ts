@@ -970,7 +970,7 @@ async function dispatchPMTool(
         const contentType = resp.headers.get('content-type') ?? '';
         let text: string;
         if (contentType.includes('application/pdf')) {
-          const localPath = `/workspace/.agency/uploads/${filename ?? basename(new URL(url).pathname) || 'download.pdf'}`;
+          const localPath = `/workspace/.agency/uploads/${filename ?? (basename(new URL(url).pathname) || 'download.pdf')}`;
           mkdirSync('/workspace/.agency/uploads', { recursive: true });
           const buffer = Buffer.from(await resp.arrayBuffer());
           writeFileSync(localPath, buffer);
