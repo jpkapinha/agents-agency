@@ -6,6 +6,8 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { resolve, dirname, relative } from 'path';
 import { execSync, execFileSync } from 'child_process';
+
+export const UPLOADS_DIR = '/workspace/.agency/uploads';
 const WORKSPACE = '/workspace';
 export const PATTERNS_DIR = '/app/patterns';
 const MAX_FILE_CHARS = 50_000;
@@ -143,6 +145,32 @@ export function runCommand(cmd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Command
   }
 }
 
+export function readPdf(filePath: string): { content: string; truncated: boolean } {
+  const abs = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath);
+  const allowed =
+    abs.startsWith(WORKSPACE + '/') ||
+    abs.startsWith(UPLOADS_DIR + '/') ||
+    abs === WORKSPACE;
+  if (!allowed) throw new Error(`Path traversal denied: ${filePath}`);
+
+  try {
+    // pdftotext (poppler-utils) — purpose-built for PDF text extraction. '-' writes to stdout.
+    const raw = execFileSync('pdftotext', [abs, '-'], {
+      timeout: 60_000,
+      maxBuffer: 20 * 1024 * 1024,
+    }).toString().trim();
+
+    if (!raw) return { content: '(PDF produced no extractable text — may be a scanned/image-only PDF)', truncated: false };
+    if (raw.length > MAX_FILE_CHARS) {
+      return { content: raw.slice(0, MAX_FILE_CHARS), truncated: true };
+    }
+    return { content: raw, truncated: false };
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? String(err);
+    return { content: `PDF extraction failed: ${msg}`, truncated: false };
+  }
+}
+
 export function gitStatus(): CommandResult {
   return runCommand('git status --short', 10_000);
 }
@@ -238,6 +266,21 @@ export function gitAdd(paths: string[]): CommandResult {
 // ---------------------------------------------------------------------------
 
 export const TOOL_SCHEMAS: Record<string, object> = {
+  read_pdf: {
+    type: 'function',
+    function: {
+      name: 'read_pdf',
+      description: 'Extract and return the text content of a PDF file. Accepts paths relative to /workspace or absolute paths under /workspace. More efficient than read_file for PDFs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Path to the PDF, e.g. ".agency/uploads/report.pdf" or "/workspace/docs/spec.pdf"' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+
   read_file: {
     type: 'function',
     function: {
@@ -340,6 +383,12 @@ export const TOOL_SCHEMAS: Record<string, object> = {
 
 export function executeTool(name: string, args: Record<string, unknown>): string {
   switch (name) {
+    case 'read_pdf': {
+      const result = readPdf(args['path'] as string);
+      return result.truncated
+        ? `${result.content}\n\n[truncated at 50K chars]`
+        : result.content;
+    }
     case 'read_file': {
       const result = readFile(args['path'] as string);
       return result.truncated

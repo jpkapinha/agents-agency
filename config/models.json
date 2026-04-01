@@ -13,7 +13,8 @@
         "backend-dev":        "openrouter/moonshotai/kimi-k2.5",
         "solidity-dev":       "openrouter/moonshotai/kimi-k2.5",
         "devops":             "openrouter/moonshotai/kimi-k2.5",
-        "risk-manager":       "openrouter/moonshotai/kimi-k2.5"
+        "risk-manager":       "openrouter/moonshotai/kimi-k2.5",
+        "qa-verifier":        "openrouter/moonshotai/kimi-k2.5"
       },
       "default": "openrouter/moonshotai/kimi-k2.5"
     },
@@ -28,7 +29,8 @@
         "backend-dev":        "openrouter/anthropic/claude-sonnet-4-5",
         "solidity-dev":       "openrouter/anthropic/claude-sonnet-4-5",
         "devops":             "openrouter/openai/gpt-4o-mini",
-        "risk-manager":       "openrouter/anthropic/claude-sonnet-4-5"
+        "risk-manager":       "openrouter/anthropic/claude-sonnet-4-5",
+        "qa-verifier":        "openrouter/moonshotai/kimi-k2.5"
       },
       "default": "openrouter/anthropic/claude-sonnet-4-5"
     }

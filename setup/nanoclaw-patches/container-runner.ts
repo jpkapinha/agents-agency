@@ -7,6 +7,7 @@
  */
 import { ChildProcess } from 'child_process';
 import { handleMessage, resolveDecision } from './skills/bot.js';
+import { registerChannelSend, registerChannelTyping } from './skills/channel-send.js';
 import { RegisteredGroup } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -64,10 +65,18 @@ export async function runContainerAgent(
   activeControllers.set(chatJid, ctrl);
 
   // stream text back through NanoClaw → channel.sendMessage → Discord
+  // NOTE: this send IS abort-gated (for the PM loop).
+  // Background agents use channelSend() (registered below) which bypasses the gate.
   const send = async (text: string): Promise<void> => {
     if (ctrl.signal.aborted) return;
     await onOutput?.({ status: 'success', result: text });
   };
+
+  // Register a persistent, non-abort-gated sender for background agent tasks.
+  // Background agents call channelSend(chatJid, text) directly so their updates
+  // still reach Discord even if the PM loop was interrupted by a new message.
+  registerChannelSend(chatJid, (text: string) => sendTextToDiscord(chatJid, text));
+  registerChannelTyping(chatJid, () => sendTypingToDiscord(chatJid));
 
   // upload a file attachment via Discord REST API directly
   const sendFile = async (filePath: string, description: string): Promise<void> => {
@@ -90,6 +99,33 @@ export async function runContainerAgent(
     return { status: 'error', result: null, error: errMsg };
   } finally {
     activeControllers.delete(chatJid);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Discord REST helpers — used by the persistent channel-send registry
+// These bypass NanoClaw's message queue entirely.
+// ---------------------------------------------------------------------------
+
+async function sendTypingToDiscord(channelId: string): Promise<void> {
+  const token = process.env['DISCORD_BOT_TOKEN'];
+  if (!token || !channelId) return;
+  await fetch(`https://discord.com/api/v10/channels/${channelId}/typing`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bot ${token}`, 'Content-Type': 'application/json' },
+  }).catch((err) => console.error('[container-runner] typing error:', err));
+}
+
+async function sendTextToDiscord(channelId: string, text: string): Promise<void> {
+  const token = process.env['DISCORD_BOT_TOKEN'];
+  if (!token || !channelId) return;
+  const chunks = text.match(/[\s\S]{1,1900}/g) ?? [text];
+  for (const chunk of chunks) {
+    await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bot ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: chunk }),
+    }).catch((err) => console.error('[container-runner] sendText error:', err));
   }
 }
 

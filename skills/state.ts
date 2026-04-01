@@ -3,7 +3,7 @@
  * Synchronous reads/writes to avoid race conditions (Node.js is single-threaded).
  * Uses write-to-tmp-then-rename for safe saves.
  */
-import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import { resolve } from 'path';
 
 const STATE_DIR = '/workspace/.agency';
@@ -50,6 +50,14 @@ export interface Repo {
   addedAt: string;
 }
 
+export interface ProjectMemory {
+  techStack: string[];      // e.g. ["Solidity 0.8.24", "Next.js 14", "wagmi v2"]
+  keyDecisions: string[];   // e.g. ["Using UUPS proxy pattern for upgradability"]
+  milestones: string[];     // e.g. ["PRD approved 2024-01-15", "Contracts deployed to Sepolia"]
+  outOfScope: string[];     // things explicitly excluded
+  lastUpdated: string;
+}
+
 export interface ProjectState {
   projectName: string;
   summary?: string;
@@ -58,6 +66,8 @@ export interface ProjectState {
   decisions: Decision[];
   blockers: Blocker[];
   repos: Repo[];
+  memory?: ProjectMemory;
+  activeModelProfile?: string; // persists across restarts — e.g. "budget" | "premium"
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +94,14 @@ function defaultState(): ProjectState {
     decisions: [],
     blockers: [],
     repos: [],
+    memory: {
+      techStack: [],
+      keyDecisions: [],
+      milestones: [],
+      outOfScope: [],
+      lastUpdated: now(),
+    },
+    activeModelProfile: 'budget',
   };
 }
 
@@ -148,7 +166,7 @@ export function addDecision(question: string, context: string, options?: string[
   return decision;
 }
 
-export function resolveDecision(id: string, answer: string): void {
+export function resolveStateDecision(id: string, answer: string): void {
   const state = loadState();
   const decision = state.decisions.find(d => d.id === id);
   if (!decision) return;
@@ -224,9 +242,57 @@ export function formatStateForPM(): string {
     lines.push(`\n**Repos:** ${state.repos.map(r => `${r.name} → ${r.localPath} (${r.url})`).join(', ')}`);
   }
 
+  const mem = state.memory;
+  if (mem) {
+    if (mem.techStack.length) lines.push(`\n**Tech stack:** ${mem.techStack.join(', ')}`);
+    if (mem.keyDecisions.length) lines.push(`\n**Key decisions:**\n${mem.keyDecisions.map(d => `• ${d}`).join('\n')}`);
+    if (mem.milestones.length) lines.push(`\n**Milestones:** ${mem.milestones.slice(-5).join(', ')}`);
+    if (mem.outOfScope.length) lines.push(`\n**Out of scope:** ${mem.outOfScope.join(', ')}`);
+  }
+
   if (state.tasks.length === 0 && openDecisions.length === 0 && state.repos.length === 0) {
     lines.push('\n(No tasks yet)');
   }
 
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Project memory helpers
+// ---------------------------------------------------------------------------
+
+export function getMemory(): ProjectMemory {
+  const state = loadState();
+  return state.memory ?? {
+    techStack: [], keyDecisions: [], milestones: [], outOfScope: [],
+    lastUpdated: now(),
+  };
+}
+
+export function updateMemory(updates: Partial<Omit<ProjectMemory, 'lastUpdated'>>): void {
+  const state = loadState();
+  const memory = state.memory ?? {
+    techStack: [], keyDecisions: [], milestones: [], outOfScope: [], lastUpdated: '',
+  };
+  if (updates.techStack) memory.techStack = [...new Set([...memory.techStack, ...updates.techStack])];
+  if (updates.keyDecisions) memory.keyDecisions = [...new Set([...memory.keyDecisions, ...updates.keyDecisions])];
+  if (updates.milestones) memory.milestones = [...memory.milestones, ...updates.milestones];
+  if (updates.outOfScope) memory.outOfScope = [...new Set([...memory.outOfScope, ...updates.outOfScope])];
+  memory.lastUpdated = now();
+  state.memory = memory;
+  saveState(state);
+}
+
+// ---------------------------------------------------------------------------
+// Model profile helpers — persists the active team config across restarts
+// ---------------------------------------------------------------------------
+
+export function getActiveProfile(): string {
+  return loadState().activeModelProfile ?? 'budget';
+}
+
+export function setActiveProfile(name: string): void {
+  const state = loadState();
+  state.activeModelProfile = name;
+  saveState(state);
 }

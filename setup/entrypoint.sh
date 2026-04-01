@@ -84,7 +84,8 @@ log "Starting NanoClaw (Andy the Project Manager)..."
 # Run from /app/nanoclaw so state lives in the container filesystem (writable
 # by agency regardless of host volume ownership).
 # bot.ts history and state.json go to /workspace/.agency (best-effort).
-mkdir -p /workspace/.agency 2>/dev/null || true
+mkdir -p /workspace/.agency/uploads 2>/dev/null || true
+chmod -R u+rwX /workspace/.agency 2>/dev/null || true
 cd /app/nanoclaw
 
 NANOCLAW_BIN="${APP_DIR}/nanoclaw/node_modules/.bin/tsx"
