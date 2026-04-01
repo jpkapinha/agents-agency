@@ -22,8 +22,9 @@ import { ChannelOpts, registerChannel } from './registry.js';
 
 const DISCORD_BOT_TOKEN    = process.env['DISCORD_BOT_TOKEN']    ?? '';
 const DISCORD_PM_CHANNEL_ID = process.env['DISCORD_PM_CHANNEL_ID'] ?? '';
-// Match @andy (case-insensitive) OR @<bot-mention>
-const TRIGGER = /^@andy\b/i;
+// Match @andy anywhere in the message (case-insensitive) OR a real Discord @mention of the bot.
+// In the dedicated PM channel, NO trigger is required — every message goes to Andy.
+const TRIGGER = /@andy\b/i;
 
 registerChannel('discord', (opts: ChannelOpts): Channel | null => {
   if (!DISCORD_BOT_TOKEN) {
@@ -74,8 +75,10 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
 
     const botId = client.user?.id ?? '';
     const isMentioned = message.mentions.users.has(botId);
-    const isTrigger = TRIGGER.test(message.content.trim());
-    if (!isMentioned && !isTrigger) return;
+    const isTrigger = TRIGGER.test(message.content);
+    // In the dedicated PM channel every message is for Andy — no trigger required.
+    const isPMChannel = message.channelId === DISCORD_PM_CHANNEL_ID;
+    if (!isPMChannel && !isMentioned && !isTrigger) return;
 
     // Strip mention / trigger prefix before handing to NanoClaw
     let content = message.content
