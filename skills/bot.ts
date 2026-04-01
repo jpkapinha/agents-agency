@@ -19,8 +19,11 @@ import {
   runExternalAgent,
   type ExternalAgentDef,
 } from './agents.js';
-import { formatStateForPM, addRepo } from './state.js';
+import { formatStateForPM, addRepo, addTask, updateTask, loadState } from './state.js';
 import { runCommand } from './tools.js';
+import { CostTracker } from './track-cost.js';
+import { log } from './logger.js';
+import type { ORMessage, ORResponse } from './types.js';
 
 const OPENROUTER_API_KEY    = process.env.OPENROUTER_API_KEY   || '';
 const PROJECT_NAME          = process.env.PROJECT_NAME          || 'Web3 Project';
@@ -30,35 +33,73 @@ const PATTERNS_DIR          = '/app/patterns';
 const HISTORY_DIR           = '/workspace/.agency';
 const WORKSPACE             = '/workspace';
 
-if (!OPENROUTER_API_KEY) { console.error('[bot] OPENROUTER_API_KEY is not set'); process.exit(1); }
+// Per-agent timeout: 10 minutes
+const AGENT_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Retryable HTTP status codes
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = 3;
+
+if (!OPENROUTER_API_KEY) { log('error', 'bot', 'OPENROUTER_API_KEY is not set'); process.exit(1); }
 
 const modelMap       = loadModelMap(MODELS_CONFIG);
 const PM_MODEL       = modelMap['project-manager'] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
 const externalAgents: ExternalAgentDef[] = loadExternalAgents(ROLES_DIR);
 
-console.log(`[bot] PM model: ${PM_MODEL}`);
-console.log(`[bot] Core team: ${AGENTS.map(a => a.role).join(', ')}`);
-console.log(`[bot] External roster: ${externalAgents.length} specialists available`);
+// Shared cost tracker — exposed via get_cost tool
+const costTracker = new CostTracker();
+costTracker.register();
+
+log('info', 'bot', 'PM initialised', {
+  model: PM_MODEL,
+  coreTeam: AGENTS.map(a => a.role),
+  externalRoster: externalAgents.length,
+});
 
 // ---------------------------------------------------------------------------
-// OpenRouter types
+// OpenRouter API call with retry + exponential backoff
 // ---------------------------------------------------------------------------
 
-interface ORMessage {
-  role: string;
-  content: string | null;
-  tool_calls?: ORToolCall[];
-  tool_call_id?: string;
-}
+async function callPMWithRetry(
+  messages: ORMessage[],
+  tools: object[],
+  signal?: AbortSignal,
+): Promise<ORResponse> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw new Error('Aborted');
 
-interface ORToolCall {
-  id: string;
-  type: 'function';
-  function: { name: string; arguments: string };
-}
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: PM_MODEL,
+        messages,
+        tools,
+        tool_choice: 'auto',
+      }),
+      signal,
+    });
 
-interface ORResponse {
-  choices: Array<{ finish_reason: string; message: ORMessage }>;
+    if (response.ok) {
+      return response.json() as Promise<ORResponse>;
+    }
+
+    const status = response.status;
+    if (RETRYABLE_STATUS_CODES.has(status) && attempt < MAX_RETRIES) {
+      const retryAfterHeader = response.headers.get('retry-after');
+      const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30_000);
+      const waitMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : baseDelay;
+
+      log('warn', 'bot', `OpenRouter PM ${status}, retrying in ${waitMs}ms`, { attempt: attempt + 1 });
+      await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+
+    const err = await response.text();
+    throw new Error(`OpenRouter PM error ${status}: ${err}`);
+  }
+
+  throw new Error('Max retries exceeded');
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +117,7 @@ function saveHistory(channelId: string, history: ORMessage[]): void {
       'utf-8',
     );
   } catch (err) {
-    console.error('[bot] Failed to save history:', err);
+    log('error', 'bot', 'Failed to save history', { error: (err as Error).message });
   }
 }
 
@@ -89,10 +130,29 @@ function loadHistory(channelId: string): ORMessage[] {
   }
 }
 
+/**
+ * Smart history truncation — preserves the first user message (which
+ * establishes project context) and the most recent messages. Inserts a
+ * truncation marker so the PM knows older context was dropped.
+ */
+function truncateHistory(history: ORMessage[], maxMessages = 40): ORMessage[] {
+  if (history.length <= maxMessages) return history;
+
+  // Keep the first user message (establishes context)
+  const first = history[0];
+  // Keep the last (maxMessages - 2) messages (leaving room for first + marker)
+  const tail = history.slice(-(maxMessages - 2));
+  const dropped = history.length - maxMessages;
+
+  return [
+    first,
+    { role: 'system', content: `[${dropped} earlier messages truncated to save context]` },
+    ...tail,
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Pending decision requests
-// When Andy calls request_decision, the next message for that channel
-// resolves the promise instead of starting a new PM loop.
 // ---------------------------------------------------------------------------
 
 const pendingDecisions = new Map<string, (answer: string) => void>();
@@ -144,6 +204,8 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 7. Answer simple questions (greetings, status, clarifications) directly — no need to call agents.
 8. Use \`add_repo\` when the client provides a GitHub URL — clone it once, then agents work within /workspace/{name}.
 9. Use \`send_artifact\` to deliver documents and files: architecture docs, audit reports, specs, PDFs. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents can push code and open PRs via: run_command("gh pr create ...").
+10. Use \`create_task\` to track non-trivial work items and \`update_task\` to mark them done/blocked. This ensures progress persists across sessions.
+11. Use \`get_cost\` when the client asks about spend, or proactively if a task involved many agent calls.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
 
@@ -262,6 +324,48 @@ const ADD_REPO_TOOL = {
   },
 };
 
+const CREATE_TASK_TOOL = {
+  type: 'function',
+  function: {
+    name: 'create_task',
+    description: 'Create a task in project state to track work across sessions. Use before delegating non-trivial work.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short task description' },
+        assignee: { type: 'string', description: 'Agent role that will work on this, e.g. "solidity-dev"' },
+      },
+      required: ['title', 'assignee'],
+    },
+  },
+};
+
+const UPDATE_TASK_TOOL = {
+  type: 'function',
+  function: {
+    name: 'update_task',
+    description: 'Update a task status and optionally record the result summary.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task ID from project state' },
+        status: { type: 'string', enum: ['pending', 'in-progress', 'done', 'blocked'] },
+        result: { type: 'string', description: 'Brief summary of what was accomplished or why it is blocked' },
+      },
+      required: ['id', 'status'],
+    },
+  },
+};
+
+const GET_COST_TOOL = {
+  type: 'function',
+  function: {
+    name: 'get_cost',
+    description: 'Get current session cost summary — total spend, breakdown by model and by role.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -270,6 +374,9 @@ const PM_TOOLS = [
   GET_STATE_TOOL,
   SEND_ARTIFACT_TOOL,
   ADD_REPO_TOOL,
+  CREATE_TASK_TOOL,
+  UPDATE_TASK_TOOL,
+  GET_COST_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -282,7 +389,7 @@ async function notifyUser(
 ): Promise<void> {
   const chunks = msg.match(/[\s\S]{1,1900}/g) ?? [msg];
   for (const chunk of chunks) {
-    await send(chunk).catch(err => console.error('[bot] notifyUser error:', err));
+    await send(chunk).catch(err => log('error', 'bot', 'notifyUser error', { error: (err as Error).message }));
   }
 }
 
@@ -336,6 +443,53 @@ async function requestDecision(
 }
 
 // ---------------------------------------------------------------------------
+// Agent timeout wrapper
+// ---------------------------------------------------------------------------
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms),
+    ),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Build enriched context for agents (includes recent completed work)
+// ---------------------------------------------------------------------------
+
+function buildAgentContext(): string {
+  const base = `Project: ${PROJECT_NAME}`;
+  try {
+    const state = loadState();
+    const recentDone = state.tasks
+      .filter(t => t.status === 'done' && t.result)
+      .slice(-3)
+      .map(t => `[${t.assignee}] ${t.title}: ${t.result}`)
+      .join('\n');
+    if (recentDone) {
+      return `${base}\n\nRecent completed work:\n${recentDone}`;
+    }
+  } catch { /* best effort */ }
+  return base;
+}
+
+// ---------------------------------------------------------------------------
+// URL validation for add_repo
+// ---------------------------------------------------------------------------
+
+const GITHUB_URL_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/;
+
+function validateRepoUrl(url: string): string | null {
+  const cleaned = url.replace(/\.git$/, '').replace(/\/$/, '');
+  if (!GITHUB_URL_RE.test(cleaned)) {
+    return null;
+  }
+  return cleaned;
+}
+
+// ---------------------------------------------------------------------------
 // PM async execution loop
 // ---------------------------------------------------------------------------
 
@@ -349,7 +503,7 @@ async function runPMAsync(
   if (!histories[channelId]) {
     histories[channelId] = loadHistory(channelId);
     if (histories[channelId].length > 0) {
-      console.log(`[bot] Restored ${histories[channelId].length} messages for channel ${channelId}`);
+      log('info', 'bot', `Restored history for channel`, { channelId, messages: histories[channelId].length });
     }
   }
   const history = histories[channelId];
@@ -358,25 +512,14 @@ async function runPMAsync(
   for (let round = 0; round < 15; round++) {
     if (signal.aborted) return;
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: PM_MODEL,
-        messages: [{ role: 'system', content: buildPMSystemPrompt() }, ...history],
-        tools: PM_TOOLS,
-        tool_choice: 'auto',
-      }),
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`OpenRouter PM error ${response.status}: ${err}`);
-    }
+    const data = await callPMWithRetry(
+      [{ role: 'system', content: buildPMSystemPrompt() }, ...history],
+      PM_TOOLS,
+      signal,
+    );
 
     if (signal.aborted) return;
 
-    const data = await response.json() as ORResponse;
     const choice = data.choices[0];
     const assistantMsg = choice.message;
     history.push(assistantMsg);
@@ -386,7 +529,7 @@ async function runPMAsync(
       if (assistantMsg.content) {
         await notifyUser(assistantMsg.content, send);
       }
-      histories[channelId] = history.slice(-40);
+      histories[channelId] = truncateHistory(history);
       saveHistory(channelId, histories[channelId]);
       return;
     }
@@ -399,14 +542,16 @@ async function runPMAsync(
     if (signal.aborted) return;
 
     const toolCalls = assistantMsg.tool_calls;
-    console.log(`[bot] PM → ${toolCalls.map(tc => {
-      try {
-        const a = JSON.parse(tc.function.arguments) as Record<string, string>;
-        if (tc.function.name === 'hire_specialist') return `hire(${a['role_description']})`;
-        if (tc.function.name === 'consult_agent') return a['role'];
-        return tc.function.name;
-      } catch { return tc.function.name; }
-    }).join(', ')}`);
+    log('info', 'bot', 'PM tool dispatch', {
+      tools: toolCalls.map(tc => {
+        try {
+          const a = JSON.parse(tc.function.arguments) as Record<string, string>;
+          if (tc.function.name === 'hire_specialist') return `hire(${a['role_description']})`;
+          if (tc.function.name === 'consult_agent') return a['role'];
+          return tc.function.name;
+        } catch { return tc.function.name; }
+      }),
+    });
 
     const toolResults = await Promise.all(
       toolCalls.map(async (tc): Promise<ORMessage> => {
@@ -416,8 +561,10 @@ async function runPMAsync(
           const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
           resultContent = await dispatchPMTool(tc.function.name, args, channelId, signal, send, sendFile);
         } catch (err) {
-          resultContent = `Error: ${(err as Error).message}`;
-          console.error('[bot] PM tool error:', err);
+          // Give PM actionable error info
+          const rawPreview = tc.function.arguments.slice(0, 200);
+          resultContent = `Error: ${(err as Error).message}. Tool: ${tc.function.name}, args: ${rawPreview}`;
+          log('error', 'bot', 'PM tool error', { tool: tc.function.name, error: (err as Error).message });
         }
         return { role: 'tool', tool_call_id: tc.id, content: resultContent };
       }),
@@ -426,7 +573,7 @@ async function runPMAsync(
     history.push(...toolResults);
   }
 
-  histories[channelId] = history.slice(-40);
+  histories[channelId] = truncateHistory(history);
   saveHistory(channelId, histories[channelId]);
   await notifyUser('I hit the maximum planning rounds. Please give me a more specific instruction to continue.', send);
 }
@@ -465,20 +612,39 @@ async function dispatchPMTool(
       const agentName = agentDef?.name ?? role;
       const taskPreview = task.length > 120 ? task.slice(0, 120) + '…' : task;
       await notifyUser(`🔧 **${agentName}** — ${taskPreview}`, send);
-      const result = await runAgent(
-        role,
-        task,
-        `Project: ${PROJECT_NAME}`,
-        modelMap,
-        OPENROUTER_API_KEY,
-        (msg) => notifyUser(`⚙️ ${msg}`, send),
-      );
-      if (result.status === 'blocked') {
-        await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`, send);
-        return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
+
+      // Auto-track task in project state
+      const taskRecord = addTask(task.slice(0, 120), role);
+      updateTask(taskRecord.id, { status: 'in-progress' });
+
+      try {
+        const agentPromise = runAgent(
+          role,
+          task,
+          buildAgentContext(),
+          modelMap,
+          OPENROUTER_API_KEY,
+          (msg) => notifyUser(`⚙️ ${msg}`, send),
+          signal,
+        );
+        const result = await withTimeout(agentPromise, AGENT_TIMEOUT_MS, `Agent ${agentName}`);
+
+        // Update task state
+        updateTask(taskRecord.id, {
+          status: result.status === 'blocked' ? 'blocked' : 'done',
+          result: result.output.slice(0, 500),
+        });
+
+        if (result.status === 'blocked') {
+          await notifyUser(`⚠️ **${agentName}** is blocked: ${result.blocker}`, send);
+          return `BLOCKED: ${result.blocker}\n\nAgent output: ${result.output}`;
+        }
+        await notifyUser(`✅ **${agentName}** — done`, send);
+        return result.output;
+      } catch (err) {
+        updateTask(taskRecord.id, { status: 'blocked', result: (err as Error).message });
+        throw err;
       }
-      await notifyUser(`✅ **${agentName}** — done`, send);
-      return result.output;
     }
 
     case 'hire_specialist': {
@@ -487,10 +653,11 @@ async function dispatchPMTool(
       const { agentName, reply } = await runExternalAgent(
         roleDesc,
         args['task'] as string,
-        `Project: ${PROJECT_NAME}`,
+        buildAgentContext(),
         externalAgents,
         modelMap,
         OPENROUTER_API_KEY,
+        signal,
       );
       await notifyUser(`✅ **${agentName}** — done`, send);
       return `[${agentName}]: ${reply}`;
@@ -502,25 +669,64 @@ async function dispatchPMTool(
     }
 
     case 'add_repo': {
-      const url = (args['url'] as string).replace(/\.git$/, '');
-      const name = (args['name'] as string | undefined) ?? url.split('/').pop() ?? 'repo';
+      const rawUrl = args['url'] as string;
+      const validUrl = validateRepoUrl(rawUrl);
+      if (!validUrl) {
+        return `Invalid repository URL: "${rawUrl}". Must be an HTTPS GitHub URL like https://github.com/org/repo`;
+      }
+
+      const name = (args['name'] as string | undefined) ?? validUrl.split('/').pop() ?? 'repo';
       const branch = (args['branch'] as string | undefined) ?? 'main';
       const localPath = `/workspace/${name}`;
 
       if (existsSync(localPath)) {
-        addRepo(url, name, branch);
+        addRepo(validUrl, name, branch);
         return `Repo already exists at ${localPath} — registered in project state.`;
       }
 
       const result = runCommand(
-        `git clone --depth 1 --branch "${branch}" "${url}.git" "${localPath}" 2>&1 || git clone --depth 1 "${url}.git" "${localPath}"`,
+        `git clone --depth 1 --branch "${branch}" "${validUrl}.git" "${localPath}" 2>&1 || git clone --depth 1 "${validUrl}.git" "${localPath}"`,
         120_000,
       );
       if (result.exitCode !== 0) {
         return `Clone failed:\n${result.stderr || result.stdout}`;
       }
-      addRepo(url, name, branch);
-      return `Cloned ${url} → ${localPath} (branch: ${branch}). Agents can now work in /workspace/${name}.`;
+      addRepo(validUrl, name, branch);
+      return `Cloned ${validUrl} → ${localPath} (branch: ${branch}). Agents can now work in /workspace/${name}.`;
+    }
+
+    case 'create_task': {
+      const taskRecord = addTask(args['title'] as string, args['assignee'] as string);
+      return `Task created: ${taskRecord.id} — "${taskRecord.title}" assigned to ${taskRecord.assignee}`;
+    }
+
+    case 'update_task': {
+      const id = args['id'] as string;
+      const status = args['status'] as 'pending' | 'in-progress' | 'done' | 'blocked';
+      const result = args['result'] as string | undefined;
+      updateTask(id, { status, ...(result ? { result } : {}) });
+      return `Task ${id} updated to "${status}"${result ? ` — ${result}` : ''}`;
+    }
+
+    case 'get_cost': {
+      const s = costTracker.summary();
+      const lines = [`**Session cost:** $${s.totalCostUsd.toFixed(4)} USD`];
+      lines.push(`**Calls:** ${s.recordCount} | **Since:** ${s.since.toISOString()}`);
+      const roleEntries = Object.entries(s.byRole).sort(([, a], [, b]) => b - a);
+      if (roleEntries.length) {
+        lines.push('\n**By role:**');
+        for (const [role, cost] of roleEntries) {
+          lines.push(`  ${role}: $${cost.toFixed(4)}`);
+        }
+      }
+      const modelEntries = Object.entries(s.byModel).sort(([, a], [, b]) => b - a);
+      if (modelEntries.length) {
+        lines.push('\n**By model:**');
+        for (const [model, cost] of modelEntries) {
+          lines.push(`  ${model}: $${cost.toFixed(4)}`);
+        }
+      }
+      return lines.join('\n');
     }
 
     default:
@@ -551,7 +757,7 @@ export async function handleMessage(
 ): Promise<void> {
   await runPMAsync(channelId, content, signal, send, sendFile).catch(async (err) => {
     if (signal.aborted) return;
-    console.error('[bot] PM execution error:', err);
+    log('error', 'bot', 'PM execution error', { error: (err as Error).message, stack: (err as Error).stack });
     await notifyUser(`Something went wrong: ${(err as Error).message}`, send);
   });
 }

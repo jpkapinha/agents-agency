@@ -5,14 +5,27 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { resolve, dirname, relative } from 'path';
-import { execSync } from 'child_process';
-
+import { execSync, execFileSync } from 'child_process';
 const WORKSPACE = '/workspace';
 export const PATTERNS_DIR = '/app/patterns';
 const MAX_FILE_CHARS = 50_000;
 const MAX_LIST_ENTRIES = 500;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 300_000;
+
+// ---------------------------------------------------------------------------
+// Sanitised environment — module-scoped so gitCommit can use it too.
+// Never expose API keys or secrets to child processes.
+// ---------------------------------------------------------------------------
+
+const SAFE_ENV: Record<string, string> = {
+  HOME: process.env['HOME'] ?? '/root',
+  PATH: process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+  TERM: 'xterm',
+  USER: process.env['USER'] ?? 'root',
+  FOUNDRY_DIR: process.env['FOUNDRY_DIR'] ?? '/home/agency/.foundry',
+  NODE_ENV: 'development',
+};
 
 // ---------------------------------------------------------------------------
 // Path safety
@@ -111,22 +124,10 @@ export interface CommandResult {
 export function runCommand(cmd: string, timeoutMs = DEFAULT_TIMEOUT_MS): CommandResult {
   const timeout = Math.min(timeoutMs, MAX_TIMEOUT_MS);
 
-  // Sanitised environment — never expose secrets to child processes
-  const safeEnv: Record<string, string> = {
-    HOME: process.env['HOME'] ?? '/root',
-    PATH: process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-    TERM: 'xterm',
-    USER: process.env['USER'] ?? 'root',
-    // Foundry needs these
-    FOUNDRY_DIR: process.env['FOUNDRY_DIR'] ?? '/home/agency/.foundry',
-    // Node needs this for npm/hardhat
-    NODE_ENV: 'development',
-  };
-
   try {
     const stdout = execSync(cmd, {
       cwd: WORKSPACE,
-      env: safeEnv,
+      env: SAFE_ENV,
       timeout,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -155,8 +156,81 @@ export function gitDiff(): CommandResult {
   return result;
 }
 
+/**
+ * Stage tracked files and commit. Uses execFileSync to pass the commit
+ * message as an argument (not via shell interpolation) — prevents injection.
+ * Uses `git add -u` (tracked files only) to avoid staging secrets or binaries.
+ */
 export function gitCommit(message: string): CommandResult {
-  return runCommand(`git add -A && git commit -m "${message.replace(/"/g, '\\"')}"`, 30_000);
+  try {
+    // Stage tracked files only — never stages untracked files (secrets, binaries, etc.)
+    execSync('git add -u', {
+      cwd: WORKSPACE,
+      env: SAFE_ENV,
+      timeout: 10_000,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // Check if there is anything staged to commit
+    try {
+      execSync('git diff --cached --quiet', {
+        cwd: WORKSPACE,
+        env: SAFE_ENV,
+        timeout: 5_000,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      // If diff --cached --quiet exits 0, there's nothing staged
+      return { stdout: 'Nothing to commit (no tracked changes).', stderr: '', exitCode: 0 };
+    } catch {
+      // Non-zero exit = there are staged changes — proceed to commit
+    }
+
+    // Commit with message passed as argument array — no shell interpolation
+    const stdout = execFileSync('git', ['commit', '-m', message], {
+      cwd: WORKSPACE,
+      env: SAFE_ENV,
+      timeout: 20_000,
+      encoding: 'utf-8',
+    });
+    return { stdout, stderr: '', exitCode: 0 };
+  } catch (err: unknown) {
+    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; status?: number; message?: string };
+    return {
+      stdout: e.stdout?.toString() ?? '',
+      stderr: e.stderr?.toString() ?? e.message ?? 'Unknown error',
+      exitCode: e.status ?? 1,
+    };
+  }
+}
+
+/**
+ * Selectively stage specific files before committing.
+ * Safer than `git add -A` when agents need to add new untracked files.
+ */
+export function gitAdd(paths: string[]): CommandResult {
+  if (!paths.length) return { stdout: 'No paths specified.', stderr: '', exitCode: 1 };
+  try {
+    // Validate all paths are within workspace
+    for (const p of paths) {
+      resolveSafe(p);
+    }
+    const stdout = execFileSync('git', ['add', '--', ...paths], {
+      cwd: WORKSPACE,
+      env: SAFE_ENV,
+      timeout: 10_000,
+      encoding: 'utf-8',
+    });
+    return { stdout, stderr: '', exitCode: 0 };
+  } catch (err: unknown) {
+    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; status?: number; message?: string };
+    return {
+      stdout: e.stdout?.toString() ?? '',
+      stderr: e.stderr?.toString() ?? e.message ?? 'Unknown error',
+      exitCode: e.status ?? 1,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +322,7 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'git_commit',
-      description: 'Stage all changes and commit with the given message. Only use when explicitly authorised.',
+      description: 'Stage tracked changes and commit with the given message. Only use when explicitly authorised.',
       parameters: {
         type: 'object',
         properties: {
