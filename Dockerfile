@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lsb-release \
     jq \
     pandoc \
+    poppler-utils \
     python3 \
     make \
     g++ \

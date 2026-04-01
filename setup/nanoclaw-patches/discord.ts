@@ -9,6 +9,10 @@
  *     → NanoClaw stores in SQLite → message loop picks up
  *     → runContainerAgent → our skills/bot.ts PM loop
  *     → onOutput callback → channel.sendMessage → Discord
+ *
+ * Attachments:
+ *   Any file attached to a Discord message is downloaded to /workspace/uploads/
+ *   and its local path is appended to the message content so Andy can read it.
  */
 import {
   Client,
@@ -17,8 +21,48 @@ import {
   Message,
   TextChannel,
 } from 'discord.js';
+import { mkdirSync, writeFileSync } from 'fs';
 import { Channel, NewMessage } from '../types.js';
 import { ChannelOpts, registerChannel } from './registry.js';
+
+const UPLOADS_DIR = '/workspace/uploads';
+
+/**
+ * Download all attachments from a Discord message to /workspace/uploads/.
+ * Returns lines to append to the message content describing each file.
+ */
+async function downloadAttachments(message: Message): Promise<string[]> {
+  if (message.attachments.size === 0) return [];
+
+  const notes: string[] = [];
+  try {
+    mkdirSync(UPLOADS_DIR, { recursive: true });
+  } catch { /* already exists */ }
+
+  for (const [, attachment] of message.attachments) {
+    // Sanitise filename — keep extension, replace unsafe chars
+    const safeName = attachment.name
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .replace(/_{2,}/g, '_');
+    const localPath = `${UPLOADS_DIR}/${safeName}`;
+
+    try {
+      const resp = await fetch(attachment.url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      writeFileSync(localPath, buffer);
+      const kb = (attachment.size / 1024).toFixed(1);
+      notes.push(`[File uploaded by user — saved to: ${localPath} (${attachment.name}, ${kb} KB)]`);
+      console.log(`[discord] Attachment saved: ${localPath} (${kb} KB)`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      notes.push(`[Attachment "${attachment.name}" could not be downloaded: ${msg}]`);
+      console.error(`[discord] Failed to download attachment ${attachment.name}: ${msg}`);
+    }
+  }
+
+  return notes;
+}
 
 const DISCORD_BOT_TOKEN    = process.env['DISCORD_BOT_TOKEN']    ?? '';
 const DISCORD_PM_CHANNEL_ID = process.env['DISCORD_PM_CHANNEL_ID'] ?? '';
@@ -70,7 +114,7 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
     }
   });
 
-  client.on(Events.MessageCreate, (message: Message) => {
+  client.on(Events.MessageCreate, async (message: Message) => {
     if (message.author.bot) return;
 
     const botId = client.user?.id ?? '';
@@ -85,6 +129,13 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
       .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
       .replace(TRIGGER, '')
       .trim();
+
+    // Download any file attachments and append their local paths to the message
+    const attachmentNotes = await downloadAttachments(message);
+    if (attachmentNotes.length > 0) {
+      content = [content, ...attachmentNotes].filter(Boolean).join('\n\n');
+    }
+
     if (!content) content = 'Hello!';
 
     const jid = message.channelId;
