@@ -221,21 +221,36 @@ ${AGENTS.map(a => `- **${a.name}** (${a.role}): ${a.description}`).join('\n')}
 **External roster** (use \`hire_specialist\`):
 You can hire any of ${externalAgents.length} additional specialists — UX designers, legal advisors, data scientists, technical writers, marketing strategists, and many more. Describe the expertise you need in natural language.
 
-**How to work:**
-1. For significant tasks: call \`send_update\` immediately with a brief plan ("On it — involving Solidity Dev and Risk Manager"), then proceed.
-2. Delegate to specialists using \`consult_agent\` (core team) or \`hire_specialist\` (external roster). Multiple calls run in parallel.
-3. Specialists can read/write files and run commands in /workspace — they will iterate until done.
-4. Use \`send_update\` at major milestones: when a specialist finishes, when tests pass, when blocked. Not after every tool call.
-5. Use \`request_decision\` when: at an architectural fork where client preference matters, before committing/deploying, or when genuinely blocked. Do NOT ask for decisions you can resolve with good engineering judgment.
-6. Use \`get_state\` at the start of a new task to check what's already been done.
-7. Answer simple questions (greetings, status, clarifications) directly — no need to call agents.
-8. Use \`add_repo\` when the client provides a GitHub URL — clone it once, then agents work within /workspace/{name}.
-9. Use \`send_artifact\` to deliver documents and files: architecture docs, audit reports, specs, PDFs. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents can push code and open PRs via: run_command("gh pr create ...").
-10. Use \`create_task\` to track non-trivial work items and \`update_task\` to mark them done/blocked. This ensures progress persists across sessions.
-11. Use \`get_cost\` when the client asks about spend, or proactively if a task involved many agent calls.
-12. Use \`switch_team\` immediately when the client asks to change the team or model configuration.
+**How to work — MANDATORY PROTOCOL:**
 
-**Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
+**PHASE 1 — UNDERSTAND (always first):**
+1. When the client shares a PRD, spec, or any document: call \`read_file\` immediately to read it fully. Never ask them to paste it.
+2. After reading, identify any ambiguities or missing information that would block delivery. Ask ALL clarifying questions in a single message — not one at a time. Keep questions concise and grouped by topic.
+3. Do NOT proceed to Phase 2 until you have enough information to plan confidently. Wait for the client's answers.
+
+**PHASE 2 — PLAN (always present before building):**
+4. Once you understand the requirements, produce a clear written plan: scope, tech stack choices, architecture overview, list of tasks per agent, and any risks. Send this to the client with \`send_update\`.
+5. End the plan with an explicit question: **"Does this plan look good? Say 'approved' or let me know what to change before we start building."**
+6. STOP. Do not call \`consult_agent\` or \`hire_specialist\` yet. Wait for explicit approval.
+
+**PHASE 3 — BUILD (only after explicit client approval):**
+7. Once the client approves (says "approved", "go ahead", "looks good", or similar), call \`send_update\` with a brief kick-off message, then dispatch agents in parallel using \`consult_agent\`.
+8. Use \`send_update\` at major milestones: when an agent finishes, when tests pass, when blocked — not after every tool call.
+9. Before committing code or opening PRs: use \`request_decision\` to confirm with the client.
+
+**PHASE 4 — DELIVER:**
+10. Use \`send_artifact\` to deliver documents and files. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf") and open PRs via: run_command("gh pr create ...").
+
+**Always:**
+- Use \`get_state\` at the start of a session to recall what has already been done.
+- Use \`add_repo\` when the client provides a GitHub URL.
+- Answer greetings and simple questions directly — no agents needed.
+- Use \`create_task\` / \`update_task\` to track all non-trivial work items.
+- Use \`get_cost\` when the client asks about spend.
+- Use \`switch_team\` immediately when the client asks to change the model configuration.
+- When the client uploads a file: it is saved to \`/workspace/uploads/\` — call \`read_file\` immediately.
+
+**Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points. Never start building without the client's explicit go-ahead.
 
 **Active team:** \`${activeConfigName}\` — ${configMeta.descriptions[activeConfigName] ?? activeConfigName}
 **Available teams:**
@@ -399,6 +414,24 @@ const GET_COST_TOOL = {
   },
 };
 
+const READ_FILE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'read_file',
+    description: 'Read a file from /workspace (including user-uploaded files in /workspace/uploads/). PDFs are automatically converted to text via pdftotext. Use this to read user-provided documents, PRDs, specs, or reports before delegating work to agents.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Path relative to /workspace (e.g. "uploads/PRD.pdf") or absolute (e.g. "/workspace/uploads/PRD.pdf")',
+        },
+      },
+      required: ['path'],
+    },
+  },
+};
+
 const SWITCH_TEAM_TOOL = {
   type: 'function',
   function: {
@@ -429,6 +462,7 @@ const PM_TOOLS = [
   CREATE_TASK_TOOL,
   UPDATE_TASK_TOOL,
   GET_COST_TOOL,
+  READ_FILE_TOOL,
   SWITCH_TEAM_TOOL,
 ];
 
@@ -780,6 +814,36 @@ async function dispatchPMTool(
         }
       }
       return lines.join('\n');
+    }
+
+    case 'read_file': {
+      const rawPath = args['path'] as string;
+      const abs = rawPath.startsWith('/') ? rawPath : resolve(WORKSPACE, rawPath);
+      // Security: must stay within /workspace
+      if (!abs.startsWith(WORKSPACE + '/') && abs !== WORKSPACE) {
+        return `Access denied: path must be within /workspace`;
+      }
+      if (!existsSync(abs)) {
+        return `File not found: ${abs}. Check /workspace/uploads/ for user-uploaded files.`;
+      }
+      const MAX_CHARS = 15_000;
+      if (abs.toLowerCase().endsWith('.pdf')) {
+        const result = runCommand(`pdftotext "${abs}" - 2>&1`, 30_000);
+        if (result.exitCode !== 0) {
+          return `Could not extract PDF text (pdftotext error):\n${result.stderr || result.stdout}`;
+        }
+        const text = result.stdout;
+        const truncated = text.length > MAX_CHARS;
+        return `[PDF: ${basename(abs)}]\n\n${text.slice(0, MAX_CHARS)}${truncated ? `\n\n[... truncated — ${text.length.toLocaleString()} chars total, showing first ${MAX_CHARS.toLocaleString()}]` : ''}`;
+      }
+      // Plain text / markdown / JSON / etc.
+      try {
+        const text = readFileSync(abs, 'utf-8');
+        const truncated = text.length > MAX_CHARS;
+        return `[File: ${basename(abs)}]\n\n${text.slice(0, MAX_CHARS)}${truncated ? `\n\n[... truncated — ${text.length.toLocaleString()} chars total]` : ''}`;
+      } catch (err) {
+        return `Could not read file: ${(err as Error).message}`;
+      }
     }
 
     case 'switch_team': {
