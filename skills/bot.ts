@@ -14,10 +14,12 @@ import { resolve, basename } from 'path';
 import {
   AGENTS,
   loadModelMap,
+  loadConfigMeta,
   runAgent,
   loadExternalAgents,
   runExternalAgent,
   type ExternalAgentDef,
+  type ConfigMeta,
 } from './agents.js';
 import { formatStateForPM, addRepo, addTask, updateTask, loadState } from './state.js';
 import { runCommand } from './tools.js';
@@ -42,8 +44,29 @@ const MAX_RETRIES = 3;
 
 if (!OPENROUTER_API_KEY) { log('error', 'bot', 'OPENROUTER_API_KEY is not set'); process.exit(1); }
 
-const modelMap       = loadModelMap(MODELS_CONFIG);
-const PM_MODEL       = modelMap['project-manager'] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
+// ---------------------------------------------------------------------------
+// Multi-team config — switchable at runtime by the user
+// ---------------------------------------------------------------------------
+
+const configMeta: ConfigMeta = loadConfigMeta(MODELS_CONFIG);
+
+// Pre-load all team model maps at startup so switching is instant
+const allModelMaps: Record<string, Record<string, string>> = {};
+for (const name of configMeta.names) {
+  allModelMaps[name] = loadModelMap(MODELS_CONFIG, name);
+}
+
+let activeConfigName: string = configMeta.defaultName;
+
+function getModelMap(): Record<string, string> {
+  return allModelMaps[activeConfigName] ?? allModelMaps[configMeta.defaultName];
+}
+
+function getPMModel(): string {
+  const map = getModelMap();
+  return map['project-manager'] ?? map['__default__'] ?? 'moonshotai/kimi-k2.5';
+}
+
 const externalAgents: ExternalAgentDef[] = loadExternalAgents(ROLES_DIR);
 
 // Shared cost tracker — exposed via get_cost tool
@@ -51,7 +74,9 @@ const costTracker = new CostTracker();
 costTracker.register();
 
 log('info', 'bot', 'PM initialised', {
-  model: PM_MODEL,
+  activeConfig: activeConfigName,
+  model: getPMModel(),
+  availableConfigs: configMeta.names,
   coreTeam: AGENTS.map(a => a.role),
   externalRoster: externalAgents.length,
 });
@@ -72,7 +97,7 @@ async function callPMWithRetry(
       method: 'POST',
       headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: PM_MODEL,
+        model: getPMModel(),
         messages,
         tools,
         tool_choice: 'auto',
@@ -90,7 +115,7 @@ async function callPMWithRetry(
       const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30_000);
       const waitMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : baseDelay;
 
-      log('warn', 'bot', `OpenRouter PM ${status}, retrying in ${waitMs}ms`, { attempt: attempt + 1 });
+      log('warn', 'bot', `OpenRouter PM ${status}, retrying in ${waitMs}ms`, { attempt: attempt + 1, model: getPMModel() });
       await new Promise(r => setTimeout(r, waitMs));
       continue;
     }
@@ -188,6 +213,8 @@ function buildPMSystemPrompt(): string {
   const state = formatStateForPM();
   return `You are Andy, the Project Manager of a Web3 development agency. You are the sole point of contact with the client — all other agents work internally.
 
+**Your identity:** You are Andy, an AI Project Manager. Your current underlying model is \`${getPMModel()}\`. When asked what AI or model you are, state this honestly and accurately.
+
 **Your core team** (use \`consult_agent\`):
 ${AGENTS.map(a => `- **${a.name}** (${a.role}): ${a.description}`).join('\n')}
 
@@ -206,8 +233,14 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 9. Use \`send_artifact\` to deliver documents and files: architecture docs, audit reports, specs, PDFs. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents can push code and open PRs via: run_command("gh pr create ...").
 10. Use \`create_task\` to track non-trivial work items and \`update_task\` to mark them done/blocked. This ensures progress persists across sessions.
 11. Use \`get_cost\` when the client asks about spend, or proactively if a task involved many agent calls.
+12. Use \`switch_team\` immediately when the client asks to change the team or model configuration.
 
 **Communication style:** Professional but direct. Summarise technical details for the client. Use bullet points.
+
+**Active team:** \`${activeConfigName}\` — ${configMeta.descriptions[activeConfigName] ?? activeConfigName}
+**Available teams:**
+${configMeta.names.map(n => `- \`${n}\`: ${configMeta.descriptions[n] ?? n}`).join('\n')}
+The client can ask you to switch teams at any time — use \`switch_team\` immediately when they do.
 
 **Current project state:**
 ${state}
@@ -366,6 +399,25 @@ const GET_COST_TOOL = {
   },
 };
 
+const SWITCH_TEAM_TOOL = {
+  type: 'function',
+  function: {
+    name: 'switch_team',
+    description: `Switch the AI model team configuration. Available configs: ${configMeta.names.map(n => `"${n}" (${configMeta.descriptions[n]})`).join(', ')}. Call this immediately when the client requests a team change.`,
+    parameters: {
+      type: 'object',
+      properties: {
+        config: {
+          type: 'string',
+          enum: configMeta.names,
+          description: 'Team configuration name to activate',
+        },
+      },
+      required: ['config'],
+    },
+  },
+};
+
 const PM_TOOLS = [
   CONSULT_AGENT_TOOL,
   HIRE_SPECIALIST_TOOL,
@@ -377,6 +429,7 @@ const PM_TOOLS = [
   CREATE_TASK_TOOL,
   UPDATE_TASK_TOOL,
   GET_COST_TOOL,
+  SWITCH_TEAM_TOOL,
 ];
 
 // ---------------------------------------------------------------------------
@@ -622,7 +675,7 @@ async function dispatchPMTool(
           role,
           task,
           buildAgentContext(),
-          modelMap,
+          getModelMap(),
           OPENROUTER_API_KEY,
           (msg) => notifyUser(`⚙️ ${msg}`, send),
           signal,
@@ -655,7 +708,7 @@ async function dispatchPMTool(
         args['task'] as string,
         buildAgentContext(),
         externalAgents,
-        modelMap,
+        getModelMap(),
         OPENROUTER_API_KEY,
         signal,
       );
@@ -727,6 +780,29 @@ async function dispatchPMTool(
         }
       }
       return lines.join('\n');
+    }
+
+    case 'switch_team': {
+      const config = args['config'] as string;
+      if (!allModelMaps[config]) {
+        return `Unknown team config: "${config}". Available: ${configMeta.names.join(', ')}`;
+      }
+      if (config === activeConfigName) {
+        return `Already on the **${config}** team — no change needed.`;
+      }
+      activeConfigName = config;
+      const desc = configMeta.descriptions[config] ?? config;
+      const newPMModel = getPMModel();
+      log('info', 'bot', 'Team config switched', { config, pmModel: newPMModel });
+      const roleList = Object.entries(allModelMaps[config])
+        .filter(([k]) => k !== '__default__')
+        .map(([role, model]) => `  • ${role}: \`${model}\``)
+        .join('\n');
+      await notifyUser(
+        `🔄 **Switched to ${config} team** — ${desc}\n\nModel assignments:\n${roleList}`,
+        send,
+      );
+      return `Team switched to "${config}". PM is now using ${newPMModel}.`;
     }
 
     default:

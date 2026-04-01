@@ -219,23 +219,74 @@ export function findBestMatch(query: string, agents: ExternalAgentDef[]): Extern
 // Model loading
 // ---------------------------------------------------------------------------
 
-export function loadModelMap(configPath: string): Record<string, string> {
-  const fallback = 'anthropic/claude-sonnet-4-5';
+// ---------------------------------------------------------------------------
+// Internal type for models.json structure
+// ---------------------------------------------------------------------------
+
+interface SingleConfig { roles?: Record<string, string>; default?: string; description?: string; }
+interface ModelsFile {
+  // New multi-config structure
+  configs?: Record<string, SingleConfig>;
+  default_config?: string;
+  // Legacy flat structure
+  roles?: Record<string, string>;
+  default?: string;
+}
+
+function buildMapFromConfig(cfg: SingleConfig, fallback: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const [role, model] of Object.entries(cfg.roles ?? {})) {
+    map[role] = (model as string).replace(/^openrouter\//, '');
+  }
+  map['__default__'] = (cfg.default ?? fallback).replace(/^openrouter\//, '');
+  return map;
+}
+
+export function loadModelMap(configPath: string, configName?: string): Record<string, string> {
+  const fallback = 'moonshotai/kimi-k2.5';
   try {
     const raw = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(raw) as { roles?: Record<string, string>; default?: string };
-    const map: Record<string, string> = {};
-    for (const [role, model] of Object.entries(config.roles ?? {})) {
-      map[role] = (model as string).replace(/^openrouter\//, '');
+    const config = JSON.parse(raw) as ModelsFile;
+
+    // New multi-config structure
+    if (config.configs) {
+      const name = configName ?? config.default_config ?? Object.keys(config.configs)[0];
+      const namedCfg = config.configs[name] ?? config.configs[Object.keys(config.configs)[0]];
+      return buildMapFromConfig(namedCfg, fallback);
     }
-    map['__default__'] = (config.default ?? fallback).replace(/^openrouter\//, '');
-    return map;
+
+    // Legacy flat structure
+    return buildMapFromConfig(config as SingleConfig, fallback);
   } catch {
     log('warn', 'agents', 'Could not load models.json — using defaults');
     const map: Record<string, string> = { '__default__': fallback };
     for (const agent of AGENTS) map[agent.role] = fallback;
     return map;
   }
+}
+
+export interface ConfigMeta {
+  names: string[];
+  defaultName: string;
+  descriptions: Record<string, string>;
+}
+
+export function loadConfigMeta(configPath: string): ConfigMeta {
+  try {
+    const raw = readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw) as ModelsFile;
+    if (config.configs) {
+      const names = Object.keys(config.configs);
+      return {
+        names,
+        defaultName: config.default_config ?? names[0] ?? 'budget',
+        descriptions: Object.fromEntries(
+          names.map(n => [n, config.configs![n].description ?? n]),
+        ),
+      };
+    }
+  } catch { /* fall through */ }
+  return { names: ['budget'], defaultName: 'budget', descriptions: { budget: 'Default config' } };
 }
 
 // ---------------------------------------------------------------------------
