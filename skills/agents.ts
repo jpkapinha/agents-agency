@@ -28,6 +28,7 @@ import type { ORMessage, ORResponse } from './types.js';
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const MAX_RETRIES = 3;
 const TRACE_DIR = '/workspace/.agency/traces';
+const REQUEST_TIMEOUT_MS = 3 * 60 * 1000; // 3 min hard cap per OpenRouter request — prevents silent stalls
 
 // ---------------------------------------------------------------------------
 // Protofire web3 patterns — injected into agent system prompts at runtime
@@ -395,6 +396,12 @@ async function callOpenRouterWithRetry(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (signal?.aborted) throw new Error('Aborted');
 
+    // Combine caller's abort signal with a per-request deadline.
+    // Prevents a single stalled OpenRouter call from consuming the entire agent budget.
+    const fetchSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
+      : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -404,7 +411,7 @@ async function callOpenRouterWithRetry(
         tools: tools.length ? tools : undefined,
         tool_choice: tools.length ? 'auto' : undefined,
       }),
-      signal,
+      signal: fetchSignal,
     });
 
     if (response.ok) {
