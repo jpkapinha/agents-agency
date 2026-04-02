@@ -67,7 +67,8 @@ const HISTORY_DIR        = '/workspace/.agency';
 const ARTIFACTS_DIR      = '/workspace/.agency/artifacts';
 const WORKSPACE          = '/workspace';
 
-const AGENT_TIMEOUT_MS       = 10 * 60 * 1000; // 10 minutes
+const AGENT_TIMEOUT_MS       = 45 * 60 * 1000; // 45 min — background agents run up to 120 rounds + shell commands
+const SPECIALIST_TIMEOUT_MS  = 10 * 60 * 1000; // 10 min — hired specialists (5 rounds, synchronous)
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const MAX_RETRIES            = 3;
 
@@ -909,7 +910,7 @@ async function dispatchPMTool(
       await notifyUser(`🔍 Hiring **${roleDesc}**…`, send);
       const { agentName, reply } = await withTimeout(
         runExternalAgent(roleDesc, args['task'] as string, buildAgentContext(), externalAgents, getModelMap(), OPENROUTER_API_KEY, signal),
-        AGENT_TIMEOUT_MS,
+        SPECIALIST_TIMEOUT_MS,
         `Specialist ${roleDesc}`,
       );
       await notifyUser(`✅ **${agentName}** — done`, send);
