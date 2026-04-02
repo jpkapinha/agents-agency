@@ -57,23 +57,24 @@ export async function runContainerAgent(
 ): Promise<ContainerOutput> {
   const { chatJid, prompt } = input;
 
-  // Interrupt any in-progress PM loop for this channel (pivot support).
-  // Background agent tasks are NOT aborted — they run to completion regardless.
+  // Interrupt any in-progress execution for this channel (pivot support)
   const prev = activeControllers.get(chatJid);
   if (prev) prev.abort();
 
   const ctrl = new AbortController();
   activeControllers.set(chatJid, ctrl);
 
-  // PM loop send — gated on abort so the PM stops talking after being interrupted.
+  // stream text back through NanoClaw → channel.sendMessage → Discord
+  // NOTE: this send IS abort-gated (for the PM loop).
+  // Background agents use channelSend() (registered below) which bypasses the gate.
   const send = async (text: string): Promise<void> => {
     if (ctrl.signal.aborted) return;
     await onOutput?.({ status: 'success', result: text });
   };
 
-  // Persistent channel send — NOT gated on abort.
-  // Background agent tasks use this via channelSend() in bot.ts so they can
-  // post progress/completion updates even after the PM loop has been aborted.
+  // Register a persistent, non-abort-gated sender for background agent tasks.
+  // Background agents call channelSend(chatJid, text) directly so their updates
+  // still reach Discord even if the PM loop was interrupted by a new message.
   registerChannelSend(chatJid, (text: string) => sendTextToDiscord(chatJid, text));
   registerChannelTyping(chatJid, () => sendTypingToDiscord(chatJid));
 
@@ -102,10 +103,10 @@ export async function runContainerAgent(
 }
 
 // ---------------------------------------------------------------------------
-// Discord REST API helpers — used for persistent sends and file uploads
+// Discord REST helpers — used by the persistent channel-send registry
+// These bypass NanoClaw's message queue entirely.
 // ---------------------------------------------------------------------------
 
-/** Trigger the "is typing..." indicator in a Discord channel. Lasts ~10 seconds. */
 async function sendTypingToDiscord(channelId: string): Promise<void> {
   const token = process.env['DISCORD_BOT_TOKEN'];
   if (!token || !channelId) return;
@@ -115,7 +116,6 @@ async function sendTypingToDiscord(channelId: string): Promise<void> {
   }).catch((err) => console.error('[container-runner] typing error:', err));
 }
 
-/** Send a text message directly to a Discord channel via REST API. */
 async function sendTextToDiscord(channelId: string, text: string): Promise<void> {
   const token = process.env['DISCORD_BOT_TOKEN'];
   if (!token || !channelId) return;
@@ -128,6 +128,10 @@ async function sendTextToDiscord(channelId: string, text: string): Promise<void>
     }).catch((err) => console.error('[container-runner] sendText error:', err));
   }
 }
+
+// ---------------------------------------------------------------------------
+// File upload via Discord REST API (used by send_artifact PM tool)
+// ---------------------------------------------------------------------------
 
 async function uploadFileToDiscord(
   channelId: string,

@@ -78,11 +78,13 @@ mkdir -p "${PATTERNS_DIR}"
 PATTERNS_SOURCE="${WEB3_SKILLS_DIR}/patterns"
 if [[ -d "${PATTERNS_SOURCE}" ]]; then
   log "Copying Protofire patterns → ${PATTERNS_DIR}..."
+  # Exclude .git to avoid permission errors on restart (git objects are read-only)
   find "${PATTERNS_SOURCE}" -mindepth 1 -maxdepth 1 ! -name '.git' -exec cp -r {} "${PATTERNS_DIR}/" \;
   PATTERN_COUNT=$(find "${PATTERNS_SOURCE}" -not -path '*/.git/*' -type f | wc -l | tr -d ' ')
   log "Copied ${PATTERN_COUNT} pattern file(s)."
 else
-  # Fallback: treat the whole repo as patterns if no patterns/ subdir (exclude .git)
+  # Fallback: treat the whole repo as patterns if no patterns/ subdir.
+  # Exclude .git to avoid permission errors on restart (git objects are read-only).
   log "No patterns/ subdirectory found — copying entire repo as patterns..."
   find "${WEB3_SKILLS_DIR}" -mindepth 1 -maxdepth 1 ! -name '.git' -exec cp -r {} "${PATTERNS_DIR}/" \;
 fi

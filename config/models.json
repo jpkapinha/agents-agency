@@ -1,7 +1,9 @@
 {
-  "profiles": {
-    "testing": {
-      "description": "Fast & cheap — all roles use kimi-k2.5. Good for iteration, flow testing, and low-cost runs.",
+  "default_config": "budget",
+  "cost-warning-threshold-usd": 5,
+  "configs": {
+    "budget": {
+      "description": "All roles use Kimi K2.5 — cheapest option (~$0.15/M tokens)",
       "roles": {
         "project-manager":    "openrouter/moonshotai/kimi-k2.5",
         "product-manager":    "openrouter/moonshotai/kimi-k2.5",
@@ -16,22 +18,21 @@
       },
       "default": "openrouter/moonshotai/kimi-k2.5"
     },
-    "production": {
-      "description": "Best capability per role — Opus for architecture & risk, Sonnet for builders & tech-lead, kimi for PM/devops/QA.",
+    "premium": {
+      "description": "Best model per role — Claude Sonnet 4.5, GPT-4o, Grok 3",
       "roles": {
-        "project-manager":    "openrouter/moonshotai/kimi-k2.5",
-        "product-manager":    "openrouter/moonshotai/kimi-k2.5",
+        "project-manager":    "openrouter/anthropic/claude-sonnet-4-5",
+        "product-manager":    "openrouter/openai/gpt-4o",
         "tech-lead":          "openrouter/anthropic/claude-sonnet-4-5",
-        "solutions-architect":"openrouter/anthropic/claude-opus-4-5",
-        "frontend-dev":       "openrouter/moonshotai/kimi-k2.5",
+        "solutions-architect":"openrouter/x-ai/grok-3",
+        "frontend-dev":       "openrouter/openai/gpt-4o",
         "backend-dev":        "openrouter/anthropic/claude-sonnet-4-5",
         "solidity-dev":       "openrouter/anthropic/claude-sonnet-4-5",
-        "devops":             "openrouter/moonshotai/kimi-k2.5",
-        "risk-manager":       "openrouter/anthropic/claude-opus-4-5",
+        "devops":             "openrouter/openai/gpt-4o-mini",
+        "risk-manager":       "openrouter/anthropic/claude-sonnet-4-5",
         "qa-verifier":        "openrouter/moonshotai/kimi-k2.5"
       },
-      "default": "openrouter/moonshotai/kimi-k2.5"
+      "default": "openrouter/anthropic/claude-sonnet-4-5"
     }
-  },
-  "cost-warning-threshold-usd": 5
+  }
 }

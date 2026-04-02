@@ -229,8 +229,19 @@ export class CostTracker {
 
 // ---------------------------------------------------------------------------
 // Standalone entry point (called by entrypoint.sh with --register)
+// ESM-compatible check (replaces CJS require.main === module)
 // ---------------------------------------------------------------------------
-if (require.main === module) {
+import { fileURLToPath } from 'url';
+
+const isMain = (() => {
+  try {
+    return process.argv[1] === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) {
   const tracker = new CostTracker();
   tracker.register();
 }

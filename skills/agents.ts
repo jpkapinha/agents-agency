@@ -1,12 +1,33 @@
 /**
  * Agent registry and execution for the Web3 agency.
  *
- * Core team agents run in agentic loops (up to 40 rounds × 3 segments = 120 effective rounds) with file/exec tools.
- * External agents (from agency-agents roster) run as single-turn consultants.
+ * Core team agents run in agentic loops (up to 40 rounds × 3 segments = 120 effective
+ * rounds) with file/exec tools. External agents run as single-turn consultants.
+ *
+ * Features from both branches:
+ *   - Auto-continuation (3 segments × 40 rounds) — handles complex multi-file tasks
+ *   - Retry with exponential backoff (429/500/502/503/504 + Retry-After header)
+ *   - AbortSignal propagation — clean interrupt when user sends a new message
+ *   - Execution traces written to /workspace/.agency/traces/ (best-effort)
+ *   - Progressive context truncation every 5 rounds
+ *   - Structured JSON logging via logger.ts
+ *   - SHELL_HYGIENE_RULES injected into every agent with shell access
+ *   - QA Verifier agent — auto quality gate after every task
+ *   - read_pdf tool available to all agents
  */
-import { readFileSync, readdirSync, existsSync } from 'fs';
+import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { TOOL_SCHEMAS, PATTERNS_DIR, executeTool } from './tools.js';
+import { log } from './logger.js';
+import type { ORMessage, ORResponse } from './types.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = 3;
+const TRACE_DIR = '/workspace/.agency/traces';
 
 // ---------------------------------------------------------------------------
 // Protofire web3 patterns — injected into agent system prompts at runtime
@@ -22,43 +43,39 @@ function buildPatternsHeader(): string {
   }
 }
 
-// Computed once at startup; empty string if no patterns loaded yet
 const PATTERNS_HEADER = existsSync(PATTERNS_DIR) ? buildPatternsHeader() : '';
-if (PATTERNS_HEADER) console.log(`[agents] Protofire patterns available: ${PATTERNS_DIR}`);
+if (PATTERNS_HEADER) log('info', 'agents', 'Protofire patterns available', { dir: PATTERNS_DIR });
 
 // ---------------------------------------------------------------------------
-// Shared shell hygiene rules — injected into every agent with run_command access.
-// These prevent the most common failure modes: garbage filenames, wrong paths,
-// files created outside /workspace, and commands treated as pseudocode.
+// Shell hygiene rules — injected into every agent with run_command access.
+// Prevents the most common LLM agent failure modes: wrong paths, garbage
+// filenames, relative paths, commands that assume cwd persists.
 // ---------------------------------------------------------------------------
 
 const SHELL_HYGIENE_RULES = `
-**SHELL COMMAND RULES — follow these exactly or you will create garbage files:**
+**SHELL COMMAND RULES — follow these exactly:**
 
 1. **Always use full absolute paths.** Every file and directory must start with \`/workspace/\`. Never use bare names, \`./\`, or relative paths.
    ✅ \`write_file("/workspace/contracts/Token.sol", ...)\`
    ❌ \`write_file("Token.sol", ...)\`  ❌ \`write_file("./contracts/Token.sol", ...)\`
 
-2. **Never use commas or brackets to separate multiple paths.** Each tool call handles one path. For shell commands use separate \`run_command\` calls or proper bash syntax.
-   ✅ \`run_command("mkdir -p /workspace/contracts")\`  then  \`run_command("mkdir -p /workspace/frontend")\`
+2. **Never use commas to separate multiple paths in one command.** Use separate calls or proper bash syntax.
    ✅ \`run_command("mkdir -p /workspace/contracts /workspace/frontend")\`
    ❌ \`run_command("mkdir /workspace/contracts, /workspace/frontend")\`
 
-3. **Always quote paths in shell commands.** If a path could ever contain spaces, quote it.
-   ✅ \`run_command("cd \\"/workspace/my project\\" && npm install")\`
+3. **Always quote paths in shell commands.** If a path could contain spaces, quote it.
 
-4. **Never cd without a full command chained after.** Prefer passing \`-C /workspace/...\` flags (git, npm) or using \`&&\` to chain. Never rely on cwd persisting between \`run_command\` calls — each call starts fresh.
-   ✅ \`run_command("npm --prefix /workspace/frontend install")\`
+4. **Never rely on cwd persisting between run_command calls.** Each call starts fresh. Use \`&&\` to chain or pass \`-C /workspace/...\` flags.
    ✅ \`run_command("cd /workspace/frontend && npm install")\`
    ❌ \`run_command("cd /workspace/frontend")\` — then assuming you're still there
 
-5. **Verify after every shell command that creates files or dirs.** Run \`ls -la /workspace/<dir>\` immediately after to confirm what was actually created. If you see unexpected filenames (single chars, punctuation), delete them: \`run_command("rm /workspace/,")\ \`.
+5. **Verify after every shell command that creates files.** Run \`ls -la /workspace/<dir>\` immediately after to confirm. Delete garbage files if you see them.
 
 6. **After every write_file call, call read_file on the same path.** If the file is empty or missing, write it again. Never claim a file exists unless read_file confirmed it.
 
-7. **Never create files or directories outside /workspace.** The entire product lives under /workspace. Do not write to /, /tmp, /home, or anywhere else.
+7. **Never create files outside /workspace.** Do not write to /, /tmp, /home, or anywhere else.
 
-8. **Check before creating.** Use \`list_files("/workspace")\` to see what already exists before running mkdir or init commands. Never re-init a git repo, re-run npm init, or overwrite existing config files without reading them first.`;
+8. **Check before creating.** Use \`list_files("/workspace")\` to see what already exists before running init commands.`;
 
 // ---------------------------------------------------------------------------
 // Core team definitions
@@ -161,11 +178,11 @@ You receive:
 - The agent's final output (what they claim they built)
 
 Your process:
-1. Scan the agent's output for every file path mentioned (e.g. /workspace/contracts/Token.sol, paths ending in .sol, .ts, .tsx, .js, .json, .md, .yaml, .toml, etc.).
+1. Scan the agent's output for every file path mentioned (e.g. /workspace/contracts/Token.sol).
 2. For EACH claimed file: call read_file to confirm it exists and has real content.
-   Mark a file as a STUB if it: is empty, contains only comments, has lines like "TODO", "PLACEHOLDER", "implement me", "pass", "// ...", or is under 10 meaningful lines for a code file.
-3. If no specific paths were mentioned, call list_files on /workspace and relevant subdirectories to check what actually exists.
-4. If the task was purely analytical (a code review, audit report, architecture recommendation) and no file writes were expected or claimed — immediately reply SKIPPED without reading any files.
+   Mark a file as a STUB if it: is empty, contains only comments, has lines like "TODO", "PLACEHOLDER", "implement me", or is under 10 meaningful lines for a code file.
+3. If no specific paths were mentioned, call list_files on /workspace and relevant subdirectories.
+4. If the task was purely analytical (a code review, audit report, architecture recommendation) and no file writes were expected — immediately reply SKIPPED without reading any files.
 
 Always end your response with EXACTLY ONE of these verdicts on its own line:
 VERIFIED: [comma-separated list of confirmed files with one-line note each]
@@ -190,7 +207,7 @@ const ROLE_TOOLS: Record<string, string[]> = {
   'tech-lead':           ['read_pdf', 'read_file', 'list_files', 'run_command'],
   'solutions-architect': ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
   'risk-manager':        ['read_pdf', 'read_file', 'list_files', 'run_command'],
-  // QA Verifier is read-only — it must never write or run commands
+  // QA Verifier is read-only — must never write or run commands
   'qa-verifier':         ['read_file', 'list_files'],
 };
 
@@ -207,7 +224,7 @@ function getToolSchemas(role: string, task: string): object[] {
 }
 
 // ---------------------------------------------------------------------------
-// External agents (from /app/nanoclaw/roles/)
+// External agents (from /app/roles/)
 // ---------------------------------------------------------------------------
 
 export interface ExternalAgentDef {
@@ -235,7 +252,7 @@ export function loadExternalAgents(rolesDir: string): ExternalAgentDef[] {
   try {
     files = readdirSync(rolesDir).filter(f => f.endsWith('.md'));
   } catch {
-    console.warn(`[agents] Roles dir not found or empty: ${rolesDir}`);
+    log('warn', 'agents', 'Roles dir not found or empty', { dir: rolesDir });
     return [];
   }
   const agents: ExternalAgentDef[] = [];
@@ -253,7 +270,7 @@ export function loadExternalAgents(rolesDir: string): ExternalAgentDef[] {
       });
     } catch { /* skip */ }
   }
-  console.log(`[agents] Loaded ${agents.length} external agents from ${rolesDir}`);
+  log('info', 'agents', `Loaded ${agents.length} external agents`, { dir: rolesDir });
   return agents;
 }
 
@@ -275,59 +292,86 @@ export function findBestMatch(query: string, agents: ExternalAgentDef[]): Extern
 }
 
 // ---------------------------------------------------------------------------
-// Model loading
+// Model loading — supports both `configs` (new) and `profiles` (legacy) keys
 // ---------------------------------------------------------------------------
 
-// Shape of the new profile-based config (profiles.X.roles / profiles.X.default)
-// Also accepts the old flat format (roles / default) for backwards compatibility.
-interface ModelsConfig {
-  profiles?: Record<string, { description?: string; roles?: Record<string, string>; default?: string }>;
-  // legacy flat format
-  roles?: Record<string, string>;
+interface SingleConfig { roles?: Record<string, string>; default?: string; description?: string; }
+interface ModelsFile {
+  configs?: Record<string, SingleConfig>;     // new format
+  profiles?: Record<string, SingleConfig>;    // master/legacy format
+  default_config?: string;
+  roles?: Record<string, string>;             // flat legacy format
   default?: string;
 }
 
-function buildRoleMap(roles: Record<string, string>, defaultModel: string): Record<string, string> {
-  const strip = (s: string) => s.replace(/^openrouter\//, '');
-  const map: Record<string, string> = { '__default__': strip(defaultModel) };
-  for (const [role, model] of Object.entries(roles)) {
-    map[role] = strip(model);
+function buildMapFromConfig(cfg: SingleConfig, fallback: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const [role, model] of Object.entries(cfg.roles ?? {})) {
+    map[role] = (model as string).replace(/^openrouter\//, '');
   }
+  map['__default__'] = (cfg.default ?? fallback).replace(/^openrouter\//, '');
   return map;
 }
 
-export function loadModelMap(configPath: string, profileName?: string): Record<string, string> {
-  const fallback = 'anthropic/claude-sonnet-4-5';
+export function loadModelMap(configPath: string, configName?: string): Record<string, string> {
+  const fallback = 'moonshotai/kimi-k2.5';
   try {
     const raw = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(raw) as ModelsConfig;
+    const config = JSON.parse(raw) as ModelsFile;
 
-    // New profile-based format
-    if (config.profiles) {
-      const names = Object.keys(config.profiles);
-      const name = (profileName && config.profiles[profileName]) ? profileName : names[0];
-      const profile = config.profiles[name] ?? {};
-      console.log(`[agents] Model profile: ${name}`);
-      return buildRoleMap(profile.roles ?? {}, profile.default ?? fallback);
+    // New configs format
+    const pool = config.configs ?? config.profiles;
+    if (pool) {
+      const names = Object.keys(pool);
+      const name = (configName && pool[configName]) ? configName
+        : (config.default_config && pool[config.default_config]) ? config.default_config
+        : names[0];
+      return buildMapFromConfig(pool[name] ?? {}, fallback);
     }
 
     // Legacy flat format
-    return buildRoleMap(config.roles ?? {}, config.default ?? fallback);
+    return buildMapFromConfig(config as SingleConfig, fallback);
   } catch {
-    console.warn('[agents] Could not load models.json — using defaults');
+    log('warn', 'agents', 'Could not load models.json — using defaults');
     const map: Record<string, string> = { '__default__': fallback };
     for (const agent of AGENTS) map[agent.role] = fallback;
     return map;
   }
 }
 
-/** Returns the list of available profile names and their descriptions. */
-export function loadProfileNames(configPath: string): Array<{ name: string; description: string; roles: Record<string, string> }> {
+export interface ConfigMeta {
+  names: string[];
+  defaultName: string;
+  descriptions: Record<string, string>;
+}
+
+export function loadConfigMeta(configPath: string): ConfigMeta {
   try {
     const raw = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(raw) as ModelsConfig;
-    if (!config.profiles) return [];
-    return Object.entries(config.profiles).map(([name, p]) => ({
+    const config = JSON.parse(raw) as ModelsFile;
+    const pool = config.configs ?? config.profiles;
+    if (pool) {
+      const names = Object.keys(pool);
+      return {
+        names,
+        defaultName: config.default_config ?? names[0] ?? 'budget',
+        descriptions: Object.fromEntries(names.map(n => [n, pool[n].description ?? n])),
+      };
+    }
+  } catch { /* fall through */ }
+  return { names: ['budget'], defaultName: 'budget', descriptions: { budget: 'Default config' } };
+}
+
+/** Compatibility alias — returns the same data as loadConfigMeta in list form. */
+export function loadProfileNames(
+  configPath: string,
+): Array<{ name: string; description: string; roles: Record<string, string> }> {
+  try {
+    const raw = readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw) as ModelsFile;
+    const pool = config.configs ?? config.profiles;
+    if (!pool) return [];
+    return Object.entries(pool).map(([name, p]) => ({
       name,
       description: p.description ?? name,
       roles: p.roles ?? {},
@@ -338,54 +382,94 @@ export function loadProfileNames(configPath: string): Array<{ name: string; desc
 }
 
 // ---------------------------------------------------------------------------
-// OpenRouter types
+// OpenRouter API call with retry + exponential backoff
 // ---------------------------------------------------------------------------
 
-interface ORMessage {
-  role: string;
-  content: string | null;
-  tool_calls?: ORToolCall[];
-  tool_call_id?: string;
-}
-
-interface ORToolCall {
-  id: string;
-  type: 'function';
-  function: { name: string; arguments: string };
-}
-
-interface ORResponse {
-  choices: Array<{ finish_reason: string; message: ORMessage }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
-}
-
-async function callOpenRouter(
+async function callOpenRouterWithRetry(
   model: string,
   messages: ORMessage[],
   tools: object[],
   apiKey: string,
+  signal?: AbortSignal,
 ): Promise<ORResponse> {
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, tools: tools.length ? tools : undefined, tool_choice: tools.length ? 'auto' : undefined }),
-  });
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`OpenRouter ${response.status}: ${err}`);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (signal?.aborted) throw new Error('Aborted');
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages,
+        tools: tools.length ? tools : undefined,
+        tool_choice: tools.length ? 'auto' : undefined,
+      }),
+      signal,
+    });
+
+    if (response.ok) {
+      return response.json() as Promise<ORResponse>;
+    }
+
+    const status = response.status;
+    if (RETRYABLE_STATUS_CODES.has(status) && attempt < MAX_RETRIES) {
+      const retryAfterHeader = response.headers.get('retry-after');
+      const baseDelay = Math.min(1000 * Math.pow(2, attempt), 30_000);
+      const waitMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : baseDelay;
+      log('warn', 'agents', `OpenRouter ${status}, retrying in ${waitMs}ms`, { attempt: attempt + 1, model });
+      await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+
+    const errBody = await response.text();
+    throw new Error(`OpenRouter ${status}: ${errBody}`);
   }
-  return response.json() as Promise<ORResponse>;
+  throw new Error('Max retries exceeded');
 }
 
 // ---------------------------------------------------------------------------
-// runAgent — agentic loop
+// Progressive context truncation — every 5 rounds, compress old tool results
+// ---------------------------------------------------------------------------
+
+function truncateOldToolResults(messages: ORMessage[], keepRecentCount: number): void {
+  const cutoff = messages.length - keepRecentCount;
+  if (cutoff <= 2) return;
+  for (let i = 2; i < cutoff; i++) {
+    if (messages[i].role === 'tool' && messages[i].content && messages[i].content!.length > 300) {
+      messages[i] = { ...messages[i], content: `[truncated — ${messages[i].content!.length} chars]` };
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Execution trace writing (best-effort)
+// ---------------------------------------------------------------------------
+
+function writeTrace(agentName: string, task: string, rounds: number, status: string, output: string): void {
+  try {
+    mkdirSync(TRACE_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeName = agentName.toLowerCase().replace(/\s+/g, '-');
+    writeFileSync(
+      `${TRACE_DIR}/${ts}-${safeName}.json`,
+      JSON.stringify({ agent: agentName, task: task.slice(0, 200), rounds, status, output: output.slice(0, 2000), timestamp: new Date().toISOString() }, null, 2),
+    );
+  } catch { /* best effort */ }
+}
+
+// ---------------------------------------------------------------------------
+// runAgent — agentic loop with auto-continuation
+//
+// Each segment runs up to MAX_ROUNDS_PER_SEGMENT. If the agent runs out of
+// rounds without finishing, a continuation prompt is injected summarising
+// completed actions and a new segment starts — up to MAX_SEGMENTS times.
+// Total effective rounds: 40 × 3 = 120.
 // ---------------------------------------------------------------------------
 
 export interface AgentResult {
   status: 'done' | 'blocked';
   output: string;
   blocker?: string;
-  tokensUsed: { prompt: number; completion: number };
 }
 
 export async function runAgent(
@@ -395,72 +479,51 @@ export async function runAgent(
   modelMap: Record<string, string>,
   apiKey: string,
   onProgress?: (msg: string) => void,
+  signal?: AbortSignal,
 ): Promise<AgentResult> {
   const agentDef = AGENTS.find(a => a.role === role);
   if (!agentDef) throw new Error(`Unknown agent role: ${role}`);
 
-  const model = modelMap[role] ?? modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
-  const systemPrompt = [
-    agentDef.systemPrompt,
-    context ? `\n\nProject context: ${context}` : '',
-    PATTERNS_HEADER,
-  ].join('');
-
+  const model = modelMap[role] ?? modelMap['__default__'] ?? 'moonshotai/kimi-k2.5';
+  const systemPrompt = [agentDef.systemPrompt, context ? `\n\nProject context: ${context}` : '', PATTERNS_HEADER].join('');
   const tools = getToolSchemas(role, task);
   const messages: ORMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: task },
   ];
 
-  console.log(`[agent] ${agentDef.name} (${model}) starting — task: ${task.slice(0, 80)}...`);
+  log('info', 'agent', `${agentDef.name} starting`, { model, role, taskPreview: task.slice(0, 80) });
 
-  // -------------------------------------------------------------------------
-  // Agentic loop with auto-continuation.
-  // Each segment runs up to MAX_ROUNDS_PER_SEGMENT iterations. If the agent
-  // runs out of rounds without finishing, we inject a "continue" prompt and
-  // start a new segment — up to MAX_SEGMENTS times. This gives up to
-  // 40 × 3 = 120 effective rounds, enough for complex multi-file tasks.
-  // -------------------------------------------------------------------------
   const MAX_ROUNDS_PER_SEGMENT = 40;
-  const MAX_SEGMENTS           = 3;
+  const MAX_SEGMENTS = 3;
 
-  let totalPrompt     = 0;
-  let totalCompletion = 0;
-  let completedActions: string[] = []; // summary for continuation prompts
+  let completedActions: string[] = [];
   let totalRounds = 0;
 
   for (let segment = 0; segment < MAX_SEGMENTS; segment++) {
-
     if (segment > 0) {
-      // Inject auto-continuation prompt so the agent knows where it left off
       const actionSummary = completedActions.length
         ? completedActions.slice(-30).join('\n')
         : '(no tool actions recorded)';
       messages.push({
         role: 'user',
-        content: [
-          `⚙️ AUTO-CONTINUATION (segment ${segment + 1}/${MAX_SEGMENTS}): You reached the iteration limit but the task is not yet complete.`,
-          ``,
-          `Tool actions completed so far:`,
-          actionSummary,
-          ``,
-          `Please review what has been done, then continue and complete the remaining work. Do not repeat steps already finished.`,
-        ].join('\n'),
+        content: `⚙️ AUTO-CONTINUATION (segment ${segment + 1}/${MAX_SEGMENTS}): You reached the iteration limit but the task is not yet complete.\n\nTool actions completed so far:\n${actionSummary}\n\nPlease continue and complete the remaining work. Do not repeat steps already finished.`,
       });
-      if (onProgress) {
-        onProgress(`↩️ **${agentDef.name}** — auto-continuing (segment ${segment + 1}/${MAX_SEGMENTS})`);
-      }
-      console.log(`[agent] ${agentDef.name} segment ${segment + 1} starting — ${totalRounds} rounds used so far`);
+      if (onProgress) onProgress(`↩️ **${agentDef.name}** — auto-continuing (segment ${segment + 1}/${MAX_SEGMENTS})`);
+      log('info', 'agent', `${agentDef.name} auto-continuation`, { segment: segment + 1, totalRounds });
     }
 
     for (let round = 0; round < MAX_ROUNDS_PER_SEGMENT; round++) {
       totalRounds++;
 
-      const data = await callOpenRouter(model, messages, tools, apiKey);
-      if (data.usage) {
-        totalPrompt     += data.usage.prompt_tokens;
-        totalCompletion += data.usage.completion_tokens;
+      if (signal?.aborted) {
+        log('info', 'agent', `${agentDef.name} interrupted`, { totalRounds });
+        const result: AgentResult = { status: 'blocked', output: '(interrupted by new message)', blocker: 'Interrupted' };
+        writeTrace(agentDef.name, task, totalRounds, 'interrupted', result.output);
+        return result;
       }
+
+      const data = await callOpenRouterWithRetry(model, messages, tools, apiKey, signal);
       const choice = data.choices[0];
       const msg = choice.message;
       messages.push(msg);
@@ -468,10 +531,14 @@ export async function runAgent(
       if (choice.finish_reason !== 'tool_calls' || !msg.tool_calls?.length) {
         const output = msg.content ?? '(no response)';
         if (output.startsWith('BLOCKED:')) {
-          return { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim(), tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
+          const result: AgentResult = { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim() };
+          log('warn', 'agent', `${agentDef.name} blocked`, { totalRounds, blocker: result.blocker });
+          writeTrace(agentDef.name, task, totalRounds, 'blocked', output);
+          return result;
         }
-        console.log(`[agent] ${agentDef.name} done (${totalRounds} rounds, ${segment + 1} segment(s))`);
-        return { status: 'done', output, tokensUsed: { prompt: totalPrompt, completion: totalCompletion } };
+        log('info', 'agent', `${agentDef.name} done`, { rounds: totalRounds, segments: segment + 1 });
+        writeTrace(agentDef.name, task, totalRounds, 'done', output);
+        return { status: 'done', output };
       }
 
       // Execute tool calls
@@ -480,10 +547,15 @@ export async function runAgent(
         let result: string;
         try {
           const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-          console.log(`[agent] ${agentDef.name} → tool: ${tc.function.name}(${Object.values(args).map(v => String(v).slice(0, 40)).join(', ')})`);
+          log('debug', 'agent', `${agentDef.name} tool call`, {
+            tool: tc.function.name,
+            argsPreview: Object.values(args).map(v => String(v).slice(0, 40)).join(', '),
+          });
           result = executeTool(tc.function.name, args);
         } catch (err) {
-          result = `Tool error: ${(err as Error).message}`;
+          const rawPreview = tc.function.arguments.slice(0, 200);
+          result = `Tool call error: ${(err as Error).message}. Raw arguments: ${rawPreview}. Fix the JSON and retry.`;
+          log('warn', 'agent', `${agentDef.name} tool error`, { tool: tc.function.name, error: (err as Error).message });
         }
         // Track for continuation summaries
         try {
@@ -499,14 +571,9 @@ export async function runAgent(
       }
       messages.push(...toolResults);
 
-      // Truncate old tool results at halfway through the segment to prevent
-      // context blowout (preserves recent context, shrinks older results)
-      if (round === Math.floor(MAX_ROUNDS_PER_SEGMENT / 2)) {
-        for (let i = 2; i < messages.length - 10; i++) {
-          if (messages[i].role === 'tool' && messages[i].content && messages[i].content!.length > 500) {
-            messages[i] = { ...messages[i], content: `[truncated — ${messages[i].content!.length} chars]` };
-          }
-        }
+      // Progressive truncation every 5 rounds — keeps recent context, compresses older results
+      if (totalRounds > 0 && totalRounds % 5 === 0) {
+        truncateOldToolResults(messages, 8);
       }
 
       if (onProgress) {
@@ -522,19 +589,20 @@ export async function runAgent(
         onProgress(`**${agentDef.name}** [${totalRounds}] ${lastTc.function.name}${detail}`);
       }
     }
-    // Segment exhausted — loop to next segment
+    // Segment exhausted — continue to next
   }
 
-  return {
+  const result: AgentResult = {
     status: 'blocked',
-    output: `Task not completed after ${totalRounds} rounds across ${MAX_SEGMENTS} segments. The agent may be stuck in a loop or the task may require human input.`,
+    output: `Task not completed after ${totalRounds} rounds across ${MAX_SEGMENTS} segments.`,
     blocker: `Exceeded ${MAX_ROUNDS_PER_SEGMENT * MAX_SEGMENTS} total iterations`,
-    tokensUsed: { prompt: totalPrompt, completion: totalCompletion },
   };
+  writeTrace(agentDef.name, task, totalRounds, 'max-rounds', result.output);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
-// runExternalAgent — single-turn consultant (read-only)
+// runExternalAgent — single-turn consultant with write access for reports
 // ---------------------------------------------------------------------------
 
 export async function runExternalAgent(
@@ -544,6 +612,7 @@ export async function runExternalAgent(
   externalAgents: ExternalAgentDef[],
   modelMap: Record<string, string>,
   apiKey: string,
+  signal?: AbortSignal,
 ): Promise<{ agentName: string; reply: string }> {
   const match = findBestMatch(roleQuery, externalAgents);
   if (!match) {
@@ -553,30 +622,32 @@ export async function runExternalAgent(
     );
   }
 
-  const model = modelMap['__default__'] ?? 'anthropic/claude-sonnet-4-5';
+  const model = modelMap['__default__'] ?? 'moonshotai/kimi-k2.5';
   const reportPath = `/workspace/.agency/reports/${match.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.md`;
   const systemPrompt = (context ? `${match.systemPrompt}\n\nProject context: ${context}` : match.systemPrompt) +
     `\n\nWrite your analysis, recommendations, and deliverables to: ${reportPath}\nUse write_file to persist your output so the team can reference it later.`;
 
   // External agents get read + write tools so they can persist their analysis
-  const tools = ['read_file', 'list_files', 'write_file'].map(n => TOOL_SCHEMAS[n]);
+  const tools = ['read_file', 'list_files', 'write_file'].map(n => TOOL_SCHEMAS[n]).filter(Boolean);
 
   const messages: ORMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: task },
   ];
 
-  console.log(`[agent] ${match.name} [hired] (${model}) — task: ${task.slice(0, 80)}...`);
+  log('info', 'agent', `${match.name} [hired] starting`, { model, taskPreview: task.slice(0, 80) });
 
   for (let round = 0; round < 5; round++) {
-    const data = await callOpenRouter(model, messages, tools, apiKey);
+    if (signal?.aborted) return { agentName: match.name, reply: '(interrupted)' };
+
+    const data = await callOpenRouterWithRetry(model, messages, tools, apiKey, signal);
     const choice = data.choices[0];
     const msg = choice.message;
     messages.push(msg);
 
     if (choice.finish_reason !== 'tool_calls' || !msg.tool_calls?.length) {
       const reply = msg.content ?? '(no response)';
-      console.log(`[agent] ${match.name} [hired] done (${reply.length} chars)`);
+      log('info', 'agent', `${match.name} [hired] done`, { replyLength: reply.length });
       return { agentName: match.name, reply };
     }
 
@@ -587,7 +658,8 @@ export async function runExternalAgent(
         const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
         result = executeTool(tc.function.name, args);
       } catch (err) {
-        result = `Tool error: ${(err as Error).message}`;
+        const rawPreview = tc.function.arguments.slice(0, 200);
+        result = `Tool call error: ${(err as Error).message}. Raw arguments: ${rawPreview}. Fix the JSON and retry.`;
       }
       toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
     }

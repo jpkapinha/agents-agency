@@ -1,11 +1,18 @@
 /**
  * Discord channel for NanoClaw — implements the Channel interface using discord.js.
  *
- * Attachment handling:
- *   PDFs       → downloaded via Node fetch + text extracted via pandoc
- *   Images     → [IMAGE_URL:url] marker added (vision in bot.ts)
- *   Text files → content injected inline
- *   Other      → file path noted for agents
+ * Self-registers via registerChannel('discord', factory) so that NanoClaw's
+ * channels/index.ts barrel import activates it automatically at startup.
+ *
+ * Flow:
+ *   Discord message → MessageCreate → opts.onMessage(chatJid, msg)
+ *     → NanoClaw stores in SQLite → message loop picks up
+ *     → runContainerAgent → our skills/bot.ts PM loop
+ *     → onOutput callback → channel.sendMessage → Discord
+ *
+ * Attachments:
+ *   Any file attached to a Discord message is downloaded to /workspace/uploads/
+ *   and its local path is appended to the message content so Andy can read it.
  */
 import {
   Client,
@@ -18,59 +25,50 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { Channel, NewMessage } from '../types.js';
 import { ChannelOpts, registerChannel } from './registry.js';
 
-const DISCORD_BOT_TOKEN     = process.env['DISCORD_BOT_TOKEN']     ?? '';
-const DISCORD_PM_CHANNEL_ID = process.env['DISCORD_PM_CHANNEL_ID'] ?? '';
-const UPLOAD_DIR            = '/workspace/.agency/uploads';
+const UPLOADS_DIR = '/workspace/uploads';
 
-const TRIGGER    = /^@andy\b/i;  // still stripped if present, but no longer required
-const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp']);
+/**
+ * Download all attachments from a Discord message to /workspace/uploads/.
+ * Returns lines to append to the message content describing each file.
+ */
+async function downloadAttachments(message: Message): Promise<string[]> {
+  if (message.attachments.size === 0) return [];
 
-// ---------------------------------------------------------------------------
-// Attachment processing — download only, no upfront text extraction.
-// PDFs are saved and the path is reported so agents can call read_pdf()
-// on demand, avoiding wasteful upfront token injection.
-// ---------------------------------------------------------------------------
+  const notes: string[] = [];
+  try {
+    mkdirSync(UPLOADS_DIR, { recursive: true });
+  } catch { /* already exists */ }
 
-async function processAttachments(message: Message): Promise<string> {
-  if (message.attachments.size === 0) return '';
+  for (const [, attachment] of message.attachments) {
+    // Sanitise filename — keep extension, replace unsafe chars
+    const safeName = attachment.name
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .replace(/_{2,}/g, '_');
+    const localPath = `${UPLOADS_DIR}/${safeName}`;
 
-  try { mkdirSync(UPLOAD_DIR, { recursive: true }); } catch { /* exists */ }
-
-  const parts: string[] = [];
-
-  for (const [, att] of message.attachments) {
-    const url       = att.url;
-    const filename  = att.name ?? 'attachment';
-    const ext       = filename.split('.').pop()?.toLowerCase() ?? '';
-    const localPath = `${UPLOAD_DIR}/${Date.now()}-${filename}`;
-
-    // Download via Node fetch — no shell escaping issues with signed CDN URLs
     try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      writeFileSync(localPath, Buffer.from(await res.arrayBuffer()));
+      const resp = await fetch(attachment.url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      writeFileSync(localPath, buffer);
+      const kb = (attachment.size / 1024).toFixed(1);
+      notes.push(`[File uploaded by user — saved to: ${localPath} (${attachment.name}, ${kb} KB)]`);
+      console.log(`[discord] Attachment saved: ${localPath} (${kb} KB)`);
     } catch (err) {
-      parts.push(`[Attachment: ${filename} — download failed: ${err}]`);
-      continue;
-    }
-
-    if (IMAGE_EXTS.has(ext)) {
-      // Vision: pass URL marker → bot.ts converts to multimodal content block
-      parts.push(`[IMAGE_URL:${url}]`);
-    } else if (ext === 'pdf') {
-      // Report path only — agents call read_pdf(".agency/uploads/...") on demand
-      parts.push(`[PDF attached: "${filename}" saved to ${localPath} — use read_pdf("${localPath}") to read it]`);
-    } else {
-      parts.push(`[File attached: "${filename}" saved to ${localPath} — use read_file("${localPath}") to read it]`);
+      const msg = err instanceof Error ? err.message : String(err);
+      notes.push(`[Attachment "${attachment.name}" could not be downloaded: ${msg}]`);
+      console.error(`[discord] Failed to download attachment ${attachment.name}: ${msg}`);
     }
   }
 
-  return parts.join('\n\n');
+  return notes;
 }
 
-// ---------------------------------------------------------------------------
-// Channel registration
-// ---------------------------------------------------------------------------
+const DISCORD_BOT_TOKEN    = process.env['DISCORD_BOT_TOKEN']    ?? '';
+const DISCORD_PM_CHANNEL_ID = process.env['DISCORD_PM_CHANNEL_ID'] ?? '';
+// Match @andy anywhere in the message (case-insensitive) OR a real Discord @mention of the bot.
+// In the dedicated PM channel, NO trigger is required — every message goes to Andy.
+const TRIGGER = /@andy\b/i;
 
 registerChannel('discord', (opts: ChannelOpts): Channel | null => {
   if (!DISCORD_BOT_TOKEN) {
@@ -105,6 +103,7 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
     connected = true;
     console.log(`[discord] Connected as ${c.user.tag}`);
     if (DISCORD_PM_CHANNEL_ID) {
+      // Register the PM channel metadata with NanoClaw so it knows this jid
       opts.onChatMetadata(
         DISCORD_PM_CHANNEL_ID,
         new Date().toISOString(),
@@ -115,35 +114,39 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
     }
   });
 
-  // Async handler — safe in discord.js v14
   client.on(Events.MessageCreate, async (message: Message) => {
     if (message.author.bot) return;
 
-    // Every message in the PM channel goes to Andy — no trigger word needed.
-    // Strip @mention / @andy prefix if the user included one, but don't require it.
     const botId = client.user?.id ?? '';
+    const isMentioned = message.mentions.users.has(botId);
+    const isTrigger = TRIGGER.test(message.content);
+    // In the dedicated PM channel every message is for Andy — no trigger required.
+    const isPMChannel = message.channelId === DISCORD_PM_CHANNEL_ID;
+    if (!isPMChannel && !isMentioned && !isTrigger) return;
+
+    // Strip mention / trigger prefix before handing to NanoClaw
     let content = message.content
       .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
       .replace(TRIGGER, '')
       .trim();
 
-    // Download and process attachments before handing off to NanoClaw
-    const attachmentContent = await processAttachments(message);
-    if (attachmentContent) {
-      content = content ? `${content}\n\n${attachmentContent}` : attachmentContent;
+    // Download any file attachments and append their local paths to the message
+    const attachmentNotes = await downloadAttachments(message);
+    if (attachmentNotes.length > 0) {
+      content = [content, ...attachmentNotes].filter(Boolean).join('\n\n');
     }
 
     if (!content) content = 'Hello!';
 
     const jid = message.channelId;
     const msg: NewMessage = {
-      id:             message.id,
-      chat_jid:       jid,
-      sender:         message.author.id,
-      sender_name:    message.author.username,
+      id: message.id,
+      chat_jid: jid,
+      sender: message.author.id,
+      sender_name: message.author.username,
       content,
-      timestamp:      message.createdAt.toISOString(),
-      is_from_me:     false,
+      timestamp: message.createdAt.toISOString(),
+      is_from_me: false,
       is_bot_message: false,
     };
 
@@ -163,6 +166,7 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
         console.error(`[discord] Channel not found: ${jid}`);
         return;
       }
+      // Discord message limit is 2000 chars; split if needed
       const chunks = text.match(/[\s\S]{1,1900}/g) ?? [text];
       for (const chunk of chunks) {
         await ch.send(chunk).catch((err) =>
@@ -171,9 +175,13 @@ registerChannel('discord', (opts: ChannelOpts): Channel | null => {
       }
     },
 
-    isConnected(): boolean { return connected; },
+    isConnected(): boolean {
+      return connected;
+    },
 
-    ownsJid(jid: string): boolean { return jid === DISCORD_PM_CHANNEL_ID; },
+    ownsJid(jid: string): boolean {
+      return jid === DISCORD_PM_CHANNEL_ID;
+    },
 
     async disconnect(): Promise<void> {
       client.destroy();

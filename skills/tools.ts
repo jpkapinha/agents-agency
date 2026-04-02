@@ -7,12 +7,27 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'f
 import { resolve, dirname, relative } from 'path';
 import { execSync, execFileSync } from 'child_process';
 
+export const UPLOADS_DIR = '/workspace/.agency/uploads';
 const WORKSPACE = '/workspace';
 export const PATTERNS_DIR = '/app/patterns';
 const MAX_FILE_CHARS = 50_000;
 const MAX_LIST_ENTRIES = 500;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 300_000;
+
+// ---------------------------------------------------------------------------
+// Sanitised environment — module-scoped so gitCommit can use it too.
+// Never expose API keys or secrets to child processes.
+// ---------------------------------------------------------------------------
+
+const SAFE_ENV: Record<string, string> = {
+  HOME: process.env['HOME'] ?? '/root',
+  PATH: process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+  TERM: 'xterm',
+  USER: process.env['USER'] ?? 'root',
+  FOUNDRY_DIR: process.env['FOUNDRY_DIR'] ?? '/home/agency/.foundry',
+  NODE_ENV: 'development',
+};
 
 // ---------------------------------------------------------------------------
 // Path safety
@@ -111,22 +126,10 @@ export interface CommandResult {
 export function runCommand(cmd: string, timeoutMs = DEFAULT_TIMEOUT_MS): CommandResult {
   const timeout = Math.min(timeoutMs, MAX_TIMEOUT_MS);
 
-  // Sanitised environment — never expose secrets to child processes
-  const safeEnv: Record<string, string> = {
-    HOME: process.env['HOME'] ?? '/root',
-    PATH: process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-    TERM: 'xterm',
-    USER: process.env['USER'] ?? 'root',
-    // Foundry needs these
-    FOUNDRY_DIR: process.env['FOUNDRY_DIR'] ?? '/home/agency/.foundry',
-    // Node needs this for npm/hardhat
-    NODE_ENV: 'development',
-  };
-
   try {
     const stdout = execSync(cmd, {
       cwd: WORKSPACE,
-      env: safeEnv,
+      env: SAFE_ENV,
       timeout,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -143,18 +146,15 @@ export function runCommand(cmd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Command
 }
 
 export function readPdf(filePath: string): { content: string; truncated: boolean } {
-  // Allow absolute paths under /workspace or relative paths resolved to it
   const abs = filePath.startsWith('/') ? filePath : resolve(WORKSPACE, filePath);
-  const UPLOADS = `${WORKSPACE}/.agency/uploads`;
   const allowed =
     abs.startsWith(WORKSPACE + '/') ||
-    abs.startsWith(UPLOADS + '/') ||
+    abs.startsWith(UPLOADS_DIR + '/') ||
     abs === WORKSPACE;
   if (!allowed) throw new Error(`Path traversal denied: ${filePath}`);
 
   try {
-    // pdftotext (poppler-utils) — purpose-built for PDF text extraction.
-    // "-" as output writes to stdout.
+    // pdftotext (poppler-utils) — purpose-built for PDF text extraction. '-' writes to stdout.
     const raw = execFileSync('pdftotext', [abs, '-'], {
       timeout: 60_000,
       maxBuffer: 20 * 1024 * 1024,
@@ -184,8 +184,81 @@ export function gitDiff(): CommandResult {
   return result;
 }
 
+/**
+ * Stage tracked files and commit. Uses execFileSync to pass the commit
+ * message as an argument (not via shell interpolation) — prevents injection.
+ * Uses `git add -u` (tracked files only) to avoid staging secrets or binaries.
+ */
 export function gitCommit(message: string): CommandResult {
-  return runCommand(`git add -A && git commit -m "${message.replace(/"/g, '\\"')}"`, 30_000);
+  try {
+    // Stage tracked files only — never stages untracked files (secrets, binaries, etc.)
+    execSync('git add -u', {
+      cwd: WORKSPACE,
+      env: SAFE_ENV,
+      timeout: 10_000,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // Check if there is anything staged to commit
+    try {
+      execSync('git diff --cached --quiet', {
+        cwd: WORKSPACE,
+        env: SAFE_ENV,
+        timeout: 5_000,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      // If diff --cached --quiet exits 0, there's nothing staged
+      return { stdout: 'Nothing to commit (no tracked changes).', stderr: '', exitCode: 0 };
+    } catch {
+      // Non-zero exit = there are staged changes — proceed to commit
+    }
+
+    // Commit with message passed as argument array — no shell interpolation
+    const stdout = execFileSync('git', ['commit', '-m', message], {
+      cwd: WORKSPACE,
+      env: SAFE_ENV,
+      timeout: 20_000,
+      encoding: 'utf-8',
+    });
+    return { stdout, stderr: '', exitCode: 0 };
+  } catch (err: unknown) {
+    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; status?: number; message?: string };
+    return {
+      stdout: e.stdout?.toString() ?? '',
+      stderr: e.stderr?.toString() ?? e.message ?? 'Unknown error',
+      exitCode: e.status ?? 1,
+    };
+  }
+}
+
+/**
+ * Selectively stage specific files before committing.
+ * Safer than `git add -A` when agents need to add new untracked files.
+ */
+export function gitAdd(paths: string[]): CommandResult {
+  if (!paths.length) return { stdout: 'No paths specified.', stderr: '', exitCode: 1 };
+  try {
+    // Validate all paths are within workspace
+    for (const p of paths) {
+      resolveSafe(p);
+    }
+    const stdout = execFileSync('git', ['add', '--', ...paths], {
+      cwd: WORKSPACE,
+      env: SAFE_ENV,
+      timeout: 10_000,
+      encoding: 'utf-8',
+    });
+    return { stdout, stderr: '', exitCode: 0 };
+  } catch (err: unknown) {
+    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; status?: number; message?: string };
+    return {
+      stdout: e.stdout?.toString() ?? '',
+      stderr: e.stderr?.toString() ?? e.message ?? 'Unknown error',
+      exitCode: e.status ?? 1,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,11 +270,11 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'read_pdf',
-      description: 'Extract and return the text content of a PDF file. Accepts paths relative to /workspace or absolute paths under /workspace/.agency/uploads/. More efficient than read_file for PDFs.',
+      description: 'Extract and return the text content of a PDF file. Accepts paths relative to /workspace or absolute paths under /workspace. More efficient than read_file for PDFs.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Path to the PDF, e.g. ".agency/uploads/report.pdf" or "docs/spec.pdf"' },
+          path: { type: 'string', description: 'Path to the PDF, e.g. ".agency/uploads/report.pdf" or "/workspace/docs/spec.pdf"' },
         },
         required: ['path'],
       },
@@ -212,7 +285,7 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read a text file from the workspace. Returns content (capped at 50K chars). Use read_pdf for PDF files.',
+      description: 'Read a file from the workspace. Returns content (capped at 50K chars).',
       parameters: {
         type: 'object',
         properties: {
@@ -227,11 +300,11 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Write or overwrite a file. Creates parent directories automatically. Path MUST be an absolute path starting with /workspace/ — never a bare filename or relative path.',
+      description: 'Write or overwrite a file in the workspace. Creates parent directories automatically.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Absolute path starting with /workspace/, e.g. "/workspace/contracts/Token.sol"' },
+          path: { type: 'string', description: 'Path relative to /workspace' },
           content: { type: 'string', description: 'Full file content to write' },
         },
         required: ['path', 'content'],
@@ -258,11 +331,11 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run a shell command. Returns stdout, stderr, and exit code. Timeout: 60s default, max 300s. IMPORTANT: Always use full absolute paths starting with /workspace/ — never bare filenames or relative paths. Never use commas to separate multiple paths in a single command (use separate calls or proper bash syntax). Each call starts with a fresh shell — do not rely on cwd persisting between calls.',
+      description: 'Run a shell command in /workspace. Returns stdout, stderr, and exit code. Timeout: 60s default, max 300s.',
       parameters: {
         type: 'object',
         properties: {
-          cmd: { type: 'string', description: 'Shell command using absolute paths, e.g. "forge test --root /workspace/contracts" or "npm --prefix /workspace/frontend install"' },
+          cmd: { type: 'string', description: 'Shell command to run, e.g. "forge test" or "npm install"' },
           timeout_ms: { type: 'number', description: 'Timeout in milliseconds (max 300000)' },
         },
         required: ['cmd'],
@@ -292,7 +365,7 @@ export const TOOL_SCHEMAS: Record<string, object> = {
     type: 'function',
     function: {
       name: 'git_commit',
-      description: 'Stage all changes and commit with the given message. Only use when explicitly authorised.',
+      description: 'Stage tracked changes and commit with the given message. Only use when explicitly authorised.',
       parameters: {
         type: 'object',
         properties: {
