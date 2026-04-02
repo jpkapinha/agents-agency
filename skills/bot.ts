@@ -67,7 +67,7 @@ const HISTORY_DIR        = '/workspace/.agency';
 const ARTIFACTS_DIR      = '/workspace/.agency/artifacts';
 const WORKSPACE          = '/workspace';
 
-const AGENT_TIMEOUT_MS       = 45 * 60 * 1000; // 45 min — background agents run up to 120 rounds + shell commands
+const AGENT_TIMEOUT_MS       = 3 * 60 * 60 * 1000; // 3 hours — per-request timeout in agents.ts guards against stalls
 const SPECIALIST_TIMEOUT_MS  = 10 * 60 * 1000; // 10 min — hired specialists (5 rounds, synchronous)
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const MAX_RETRIES            = 3;
@@ -340,6 +340,34 @@ function validateRepoUrl(url: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace filesystem snapshot — gives Andy ground truth about disk contents
+// regardless of which tasks completed/failed/timed-out.
+// ---------------------------------------------------------------------------
+
+function buildWorkspaceSnapshot(): string {
+  try {
+    const topLevel = readdirSync(WORKSPACE).filter(f => !f.startsWith('.'));
+    const lines: string[] = ['**Workspace — actual files on disk (/workspace):**'];
+    for (const entry of topLevel.slice(0, 20)) {
+      const full = `${WORKSPACE}/${entry}`;
+      try {
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          const children = readdirSync(full).filter(f => !f.startsWith('.')).slice(0, 8);
+          lines.push(`  📁 ${entry}/  [${children.join(', ')}${children.length === 8 ? ', …' : ''}]`);
+        } else {
+          lines.push(`  📄 ${entry}`);
+        }
+      } catch { lines.push(`  ${entry}`); }
+    }
+    if (topLevel.length > 20) lines.push(`  … and ${topLevel.length - 20} more`);
+    return lines.join('\n');
+  } catch {
+    return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PM system prompt
 // ---------------------------------------------------------------------------
 
@@ -390,7 +418,7 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 14. After delivery, use \`update_memory\` to record the milestone.
 
 **Always:**
-- Use \`get_state\` at the start of a session to recall what has already been done.
+- Use \`get_state\` at the start of a session to recall what has already been done. \`get_state\` also shows a **live filesystem snapshot** of /workspace — always call it when the client asks "what was delivered?", "what files exist?", or "what's the status?". Never claim something is missing without first checking \`get_state\`.
 - Use \`list_artifacts\` to show the client what project documents exist.
 - Use \`read_artifact\` to read the latest version before re-dispatching agents (client may have edited the file).
 - Use \`add_repo\` when the client provides a GitHub URL.
@@ -891,8 +919,11 @@ async function dispatchPMTool(
       return `Client answered: ${answer}`;
     }
 
-    case 'get_state':
-      return formatStateForPM();
+    case 'get_state': {
+      const stateText = formatStateForPM();
+      const snapshot = buildWorkspaceSnapshot();
+      return snapshot ? `${stateText}\n\n${snapshot}` : stateText;
+    }
 
     case 'consult_agent': {
       const role = args['role'] as string;
