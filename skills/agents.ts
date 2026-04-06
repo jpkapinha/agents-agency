@@ -2,20 +2,23 @@
  * Agent registry and execution for the Web3 agency.
  *
  * Core team agents run in agentic loops (up to 40 rounds × 3 segments = 120 effective
- * rounds) with file/exec tools. External agents run as single-turn consultants.
+ * rounds) with file/exec tools. External agents run with up to 15 rounds.
  *
- * Features from both branches:
- *   - Auto-continuation (3 segments × 40 rounds) — handles complex multi-file tasks
+ * Production quality features:
+ *   - Auto-continuation (3 segments × 40 rounds) with full task re-statement
  *   - Retry with exponential backoff (429/500/502/503/504 + Retry-After header)
+ *   - Per-request fetch timeout (3 min) via AbortSignal.any()
  *   - AbortSignal propagation — clean interrupt when user sends a new message
  *   - Execution traces written to /workspace/.agency/traces/ (best-effort)
- *   - Progressive context truncation every 5 rounds
+ *   - Progressive context truncation every 8 rounds (keeps last 14 messages)
  *   - Structured JSON logging via logger.ts
  *   - SHELL_HYGIENE_RULES injected into every agent with shell access
- *   - QA Verifier agent — auto quality gate after every task
+ *   - SELF_VERIFICATION_RULES injected into every builder agent
+ *   - QA Verifier agent — compiles, tests, and verifies deliverables
  *   - read_pdf tool available to all agents
+ *   - Workspace tree injected into agent context
  */
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { TOOL_SCHEMAS, PATTERNS_DIR, executeTool } from './tools.js';
 import { log } from './logger.js';
@@ -28,7 +31,8 @@ import type { ORMessage, ORResponse } from './types.js';
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const MAX_RETRIES = 3;
 const TRACE_DIR = '/workspace/.agency/traces';
-const REQUEST_TIMEOUT_MS = 3 * 60 * 1000; // 3 min hard cap per OpenRouter request — prevents silent stalls
+const REQUEST_TIMEOUT_MS = 3 * 60 * 1000; // 3 min hard cap per OpenRouter request
+const WORKSPACE = '/workspace';
 
 // ---------------------------------------------------------------------------
 // Protofire web3 patterns — injected into agent system prompts at runtime
@@ -49,8 +53,6 @@ if (PATTERNS_HEADER) log('info', 'agents', 'Protofire patterns available', { dir
 
 // ---------------------------------------------------------------------------
 // Shell hygiene rules — injected into every agent with run_command access.
-// Prevents the most common LLM agent failure modes: wrong paths, garbage
-// filenames, relative paths, commands that assume cwd persists.
 // ---------------------------------------------------------------------------
 
 const SHELL_HYGIENE_RULES = `
@@ -66,17 +68,50 @@ const SHELL_HYGIENE_RULES = `
 
 3. **Always quote paths in shell commands.** If a path could contain spaces, quote it.
 
-4. **Never rely on cwd persisting between run_command calls.** Each call starts fresh. Use \`&&\` to chain or pass \`-C /workspace/...\` flags.
+4. **Never rely on cwd persisting between run_command calls.** Each call starts fresh at /workspace. Use \`&&\` to chain.
    ✅ \`run_command("cd /workspace/frontend && npm install")\`
-   ❌ \`run_command("cd /workspace/frontend")\` — then assuming you're still there
+   ❌ \`run_command("cd /workspace/frontend")\` then assuming you're still there
 
-5. **Verify after every shell command that creates files.** Run \`ls -la /workspace/<dir>\` immediately after to confirm. Delete garbage files if you see them.
+5. **Verify after every shell command that creates files.** Run \`ls -la /workspace/<dir>\` immediately after. Delete garbage files if you see them.
 
-6. **After every write_file call, call read_file on the same path.** If the file is empty or missing, write it again. Never claim a file exists unless read_file confirmed it.
+6. **After every write_file call, call read_file on the same path.** If the file is empty or missing, write it again.
 
 7. **Never create files outside /workspace.** Do not write to /, /tmp, /home, or anywhere else.
 
-8. **Check before creating.** Use \`list_files("/workspace")\` to see what already exists before running init commands.`;
+8. **Check before creating.** Use \`list_files("/workspace")\` to see what already exists before running init commands.
+
+9. **Check exit codes.** If a run_command returns a non-zero exitCode, read the stderr, fix the issue, and retry. Never ignore errors.
+
+10. **Environment variables do NOT persist between run_command calls.** Export them inline: \`run_command("export NODE_ENV=test && cd /workspace/api && npm test")\``;
+
+// ---------------------------------------------------------------------------
+// Self-verification rules — injected into every builder agent (write access).
+// Forces the build→test→fix loop that makes deliverables actually work.
+// ---------------------------------------------------------------------------
+
+const SELF_VERIFICATION_RULES = `
+**SELF-VERIFICATION — you MUST do this before finishing:**
+
+1. After writing all files, **run the relevant build/compile command**:
+   - Solidity: \`cd /workspace/<project> && forge build\`
+   - TypeScript/Node: \`cd /workspace/<project> && npx tsc --noEmit\` or \`npm run build\`
+   - Frontend: \`cd /workspace/<project> && npm run build\`
+
+2. If the build fails, **read the error, fix the code, and rebuild**. Repeat until it compiles cleanly.
+
+3. **Run tests** if a test suite exists:
+   - Solidity: \`cd /workspace/<project> && forge test\`
+   - Node: \`cd /workspace/<project> && npm test\`
+
+4. If tests fail, **fix the failing tests or the code causing failures**. Do NOT skip this step.
+
+5. In your final summary, include:
+   - Every file path you created or modified
+   - Build result (pass/fail)
+   - Test result (pass/fail/no tests)
+   - Any known limitations or TODOs
+
+6. **Never claim "done" if the build is broken.** If you cannot fix it, say BLOCKED: <specific reason>.`;
 
 // ---------------------------------------------------------------------------
 // Core team definitions
@@ -97,19 +132,32 @@ export const AGENTS: AgentDef[] = [
     systemPrompt: `You are a senior Solidity smart contract engineer at a Web3 development agency.
 You specialise in EVM contracts, DeFi protocols (AMMs, lending, staking, vaults), token standards (ERC-20/721/1155/4626), OpenZeppelin patterns, upgradeable proxies (UUPS/Transparent), and gas optimisation.
 You write production-quality Solidity (0.8.x), complete NatSpec documentation, and Foundry test suites.
-Work iteratively: read existing code first, write your implementation, run forge build/test, fix errors, repeat until tests pass.
-When done, provide a concise summary of what you built, the confirmed file paths, and the test results.
+
+**How you work:**
+1. Read existing code first — check /workspace for what already exists. Read files other agents created.
+2. Write your implementation with complete, production-ready code.
+3. Run forge build — fix all compilation errors before proceeding.
+4. Run forge test — fix all test failures. Repeat until green.
+5. Provide a concise summary: file paths, build result, test result.
+
 If you are truly blocked (missing external dependency, need human decision), reply with: BLOCKED: <reason>
-${SHELL_HYGIENE_RULES}`,
+${SHELL_HYGIENE_RULES}
+${SELF_VERIFICATION_RULES}`,
   },
   {
     role: 'tech-lead',
     name: 'Tech Lead',
-    description: 'Sets engineering standards, reviews architecture, evaluates technical trade-offs, and ensures code quality across the stack.',
+    description: 'Sets engineering standards, reviews architecture, evaluates technical trade-offs, ensures code quality, and writes technical documentation.',
     systemPrompt: `You are the Tech Lead of a Web3 development agency.
 You own engineering standards, architecture decisions, and code quality. You evaluate build-vs-buy trade-offs, select libraries, and set patterns the rest of the team follows.
-You can read existing code and run commands to verify your recommendations (e.g. forge test, npm test, tsc --noEmit).
-Be opinionated and concise. Provide clear technical recommendations with brief rationale.
+You can read existing code, run commands to verify recommendations (forge test, npm test, tsc --noEmit), and write technical documentation.
+
+**How you work:**
+1. Read existing code and other agents' deliverables before making recommendations.
+2. Be opinionated and concise. Provide clear technical recommendations with brief rationale.
+3. Write technical docs (architecture decisions, coding standards) to /workspace/.agency/artifacts/.
+4. Run verification commands to validate your recommendations work in practice.
+
 If you are blocked, reply with: BLOCKED: <reason>
 ${SHELL_HYGIENE_RULES}`,
   },
@@ -119,12 +167,17 @@ ${SHELL_HYGIENE_RULES}`,
     description: 'Designs end-to-end system architecture for Web3 applications — on-chain, off-chain, and integrations.',
     systemPrompt: `You are a Solutions Architect at a Web3 development agency.
 You design complete system architectures: smart contract layers, off-chain services, indexing strategies (The Graph, custom indexers), frontend architecture, wallet integrations, cross-chain bridges, and infrastructure.
-Read existing files to understand the current state before proposing architecture.
-You can run commands to validate your architecture decisions (e.g. tsc --noEmit, forge build, npm run build).
-Document your architecture decisions in /workspace/.agency/artifacts/architecture.md.
-Focus on scalability, security, and pragmatism. Avoid over-engineering.
+
+**How you work:**
+1. Read existing files to understand the current state before proposing architecture.
+2. Check what other agents have built — read their files, understand their interfaces.
+3. Run commands to validate your architecture decisions (tsc --noEmit, forge build, npm run build).
+4. Document your architecture decisions in /workspace/.agency/artifacts/architecture.md.
+5. Focus on scalability, security, and pragmatism. Avoid over-engineering.
+
 If you are blocked, reply with: BLOCKED: <reason>
-${SHELL_HYGIENE_RULES}`,
+${SHELL_HYGIENE_RULES}
+${SELF_VERIFICATION_RULES}`,
   },
   {
     role: 'frontend-dev',
@@ -132,10 +185,17 @@ ${SHELL_HYGIENE_RULES}`,
     description: 'Builds React/Next.js Web3 UIs — wallet connections, contract interactions, real-time on-chain data, and responsive design.',
     systemPrompt: `You are a senior frontend developer at a Web3 development agency.
 You specialise in React, Next.js, TypeScript, wagmi/viem, ethers.js, RainbowKit/ConnectKit wallet UX, and responsive design with Tailwind CSS.
-Read existing code first. Write complete component implementations. Run npm commands to install deps and verify builds.
-When done, summarise what you built and list the confirmed file paths.
+
+**How you work:**
+1. Read existing code first — check what contracts, ABIs, and API endpoints other agents created.
+2. Write complete component implementations — no stubs, no TODOs, no placeholder content.
+3. Run \`cd /workspace/<project> && npm install && npm run build\` — fix all errors.
+4. Run \`npm test\` if tests exist — fix failures.
+5. Summarise: file paths, build result, test result.
+
 If you are blocked, reply with: BLOCKED: <reason>
-${SHELL_HYGIENE_RULES}`,
+${SHELL_HYGIENE_RULES}
+${SELF_VERIFICATION_RULES}`,
   },
   {
     role: 'backend-dev',
@@ -143,10 +203,17 @@ ${SHELL_HYGIENE_RULES}`,
     description: 'Builds off-chain services — Node.js APIs, event indexers, cron jobs, database schemas, and integrations with on-chain contracts.',
     systemPrompt: `You are a senior backend developer at a Web3 development agency.
 You build off-chain infrastructure: Node.js/TypeScript REST and GraphQL APIs, event listeners and indexers (ethers.js, viem), PostgreSQL/Redis schemas, job queues, and IPFS/Arweave integrations.
-Read existing code first. Write production-ready code. Run npm commands to verify.
-When done, summarise what you built and list the confirmed file paths.
+
+**How you work:**
+1. Read existing code first — check what contracts, ABIs, and frontend code other agents created.
+2. Write production-ready code — complete implementations, proper error handling, typed interfaces.
+3. Run \`cd /workspace/<project> && npm install && npx tsc --noEmit\` — fix all type errors.
+4. Run \`npm test\` if tests exist — fix failures.
+5. Summarise: file paths, build result, test result, API endpoints created.
+
 If you are blocked, reply with: BLOCKED: <reason>
-${SHELL_HYGIENE_RULES}`,
+${SHELL_HYGIENE_RULES}
+${SELF_VERIFICATION_RULES}`,
   },
   {
     role: 'devops',
@@ -154,45 +221,71 @@ ${SHELL_HYGIENE_RULES}`,
     description: 'Handles infrastructure, Docker, CI/CD pipelines, deployments, monitoring, and cloud configuration.',
     systemPrompt: `You are a DevOps engineer at a Web3 development agency.
 You handle Docker/Docker Compose, GitHub Actions CI/CD, contract deployment scripts (Foundry scripts, Hardhat Ignition), multi-env configuration, and monitoring.
-Read existing config files first. Write complete working YAML/shell. Run commands to verify.
-When done, summarise what you set up and list the confirmed file paths.
+
+**How you work:**
+1. Read existing config files and code from other agents first.
+2. Write complete working YAML/shell/Dockerfiles — no placeholders.
+3. Run commands to verify: \`docker compose config\`, \`yamllint\`, syntax checks.
+4. Validate deployment scripts actually work: \`forge script --help\`, dry-runs.
+5. Summarise: file paths, what was configured, verification result.
+
 If you are blocked, reply with: BLOCKED: <reason>
-${SHELL_HYGIENE_RULES}`,
+${SHELL_HYGIENE_RULES}
+${SELF_VERIFICATION_RULES}`,
   },
   {
     role: 'risk-manager',
     name: 'Risk Manager',
-    description: 'Analyses security risks, threat models, audit readiness, regulatory considerations, and operational risks for Web3 systems.',
+    description: 'Analyses security risks, threat models, audit readiness, regulatory considerations, and writes risk assessment reports.',
     systemPrompt: `You are the Risk Manager of a Web3 development agency.
 You identify and assess security risks (reentrancy, oracle manipulation, MEV, access control flaws, upgrade key management), perform threat modelling, evaluate audit readiness, and flag regulatory/compliance considerations.
-Read the code you are asked to review. Run static analysis tools when available (slither, solhint, npm audit). Be direct. Prioritise by severity (Critical / High / Medium / Low). Provide specific mitigations.
-If you are blocked, reply with: BLOCKED: <reason>`,
+
+**How you work:**
+1. Read the code you are asked to review thoroughly — every contract, every API endpoint.
+2. Run static analysis tools when available: \`cd /workspace/<project> && forge build && slither .\` or \`npm audit\` or \`solhint\`.
+3. Be direct. Prioritise by severity (Critical / High / Medium / Low). Provide specific mitigations.
+4. Write your findings to a report file: /workspace/.agency/artifacts/risk-report.md
+5. Include: findings table, severity ratings, specific code references, recommended fixes.
+
+If you are blocked, reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
   {
     role: 'qa-verifier',
     name: 'QA Verifier',
-    description: 'Internal quality gate — verifies that claimed deliverables actually exist and have real, non-stub content. Runs automatically after every agent task.',
-    systemPrompt: `You are the QA Verifier at a Web3 development agency. You run automatically after every agent task. Your job is fast and focused: confirm that deliverables claimed by the previous agent actually exist and contain real, complete content — not stubs, not placeholders, not empty files.
+    description: 'Quality gate — verifies deliverables exist, compiles, tests pass, and match the original task requirements.',
+    systemPrompt: `You are the QA Verifier at a Web3 development agency. You run automatically after every agent task. Your job is thorough: confirm deliverables exist, have real content, compile successfully, and tests pass.
 
 You receive:
 - The original task given to an agent
 - The agent's final output (what they claim they built)
 
 Your process:
-1. Scan the agent's output for every file path mentioned (e.g. /workspace/contracts/Token.sol).
-2. For EACH claimed file: call read_file to confirm it exists and has real content.
-   Mark a file as a STUB if it: is empty, contains only comments, has lines like "TODO", "PLACEHOLDER", "implement me", or is under 10 meaningful lines for a code file.
-3. If no specific paths were mentioned, call list_files on /workspace and relevant subdirectories.
-4. If the task was purely analytical (a code review, audit report, architecture recommendation) and no file writes were expected — immediately reply SKIPPED without reading any files.
+1. **Check file existence:** Scan the agent's output for file paths. Call read_file on each to confirm it exists with real content (not stubs, not empty, not TODO-only).
 
-Always end your response with EXACTLY ONE of these verdicts on its own line:
-VERIFIED: [comma-separated list of confirmed files with one-line note each]
-PARTIAL: [confirmed files] | MISSING: [absent or stub files with details]
-FAILED: [all claimed files missing or stubs — explain specifically what is wrong]
+2. **Verify compilation/build:** Run the appropriate build command:
+   - Solidity projects: \`cd /workspace/<project> && forge build 2>&1\`
+   - TypeScript/Node: \`cd /workspace/<project> && npx tsc --noEmit 2>&1\` or \`npm run build 2>&1\`
+   - Frontend: \`cd /workspace/<project> && npm run build 2>&1\`
+   If there's no project structure, skip this step and note it.
+
+3. **Run tests** if a test suite exists:
+   - \`cd /workspace/<project> && forge test 2>&1\` or \`npm test 2>&1\`
+   If no tests exist, note "no test suite found" — this is not a failure.
+
+4. **Check task requirements:** Compare what was built against the original task description. Are the key requirements addressed? Are there obvious gaps?
+
+5. If the task was purely analytical (code review, audit, architecture recommendation) with no file deliverables expected, reply SKIPPED.
+
+Always end your response with EXACTLY ONE verdict:
+VERIFIED: [files] | Build: pass | Tests: pass/none | Requirements: met
+PARTIAL: [confirmed files] | Build: pass/fail | Tests: pass/fail | GAPS: [what's missing or broken]
+FAILED: [reason — build broken, no files, requirements not met]
 SKIPPED: Analytical task — no file deliverables expected
 
-Be fast and direct. Reading the first 30 lines of each file is sufficient to judge real vs. stub content.
-If you are truly blocked, reply with: BLOCKED: <reason>`,
+Be thorough but fast. Use run_command to actually verify, don't just read files.
+If you are truly blocked, reply with: BLOCKED: <reason>
+${SHELL_HYGIENE_RULES}`,
   },
 ];
 
@@ -205,11 +298,11 @@ const ROLE_TOOLS: Record<string, string[]> = {
   'frontend-dev':        ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
   'backend-dev':         ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
   'devops':              ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command', 'git_status', 'git_diff', 'git_commit'],
-  'tech-lead':           ['read_pdf', 'read_file', 'list_files', 'run_command'],
+  'tech-lead':           ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
   'solutions-architect': ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
-  'risk-manager':        ['read_pdf', 'read_file', 'list_files', 'run_command'],
-  // QA Verifier is read-only — must never write or run commands
-  'qa-verifier':         ['read_file', 'list_files'],
+  'risk-manager':        ['read_pdf', 'read_file', 'write_file', 'list_files', 'run_command'],
+  // QA Verifier: read + run_command (for compile/test verification), NO write_file
+  'qa-verifier':         ['read_file', 'list_files', 'run_command'],
 };
 
 function getToolSchemas(role: string, task: string): object[] {
@@ -290,6 +383,33 @@ export function findBestMatch(query: string, agents: ExternalAgentDef[]): Extern
     if (score > bestScore) { best = agent; bestScore = score; }
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace tree snapshot — gives agents visibility into what exists on disk
+// ---------------------------------------------------------------------------
+
+export function buildWorkspaceTree(): string {
+  try {
+    const topLevel = readdirSync(WORKSPACE).filter(f => !f.startsWith('.'));
+    if (!topLevel.length) return '\n\nWorkspace is empty — /workspace/ has no files yet.';
+    const lines: string[] = ['\n\n**Current workspace (/workspace):**'];
+    for (const entry of topLevel.slice(0, 15)) {
+      const full = `${WORKSPACE}/${entry}`;
+      try {
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          const children = readdirSync(full).filter(f => !f.startsWith('.')).slice(0, 6);
+          lines.push(`  ${entry}/  → ${children.join(', ')}${children.length === 6 ? ', …' : ''}`);
+        } else {
+          lines.push(`  ${entry}`);
+        }
+      } catch { lines.push(`  ${entry}`); }
+    }
+    return lines.join('\n');
+  } catch {
+    return '';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,20 +522,42 @@ async function callOpenRouterWithRetry(
       ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
       : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages,
-        tools: tools.length ? tools : undefined,
-        tool_choice: tools.length ? 'auto' : undefined,
-      }),
-      signal: fetchSignal,
-    });
+    let response: Response;
+    try {
+      response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages,
+          tools: tools.length ? tools : undefined,
+          tool_choice: tools.length ? 'auto' : undefined,
+        }),
+        signal: fetchSignal,
+      });
+    } catch (err) {
+      // Timeout or network error — treat as retryable
+      if (attempt < MAX_RETRIES) {
+        const waitMs = Math.min(1000 * Math.pow(2, attempt), 30_000);
+        log('warn', 'agents', `OpenRouter fetch error, retrying in ${waitMs}ms`, { attempt: attempt + 1, model, error: (err as Error).message });
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      throw err;
+    }
 
     if (response.ok) {
-      return response.json() as Promise<ORResponse>;
+      const data = await response.json() as ORResponse;
+      // Validate response structure
+      if (!data.choices?.[0]?.message) {
+        if (attempt < MAX_RETRIES) {
+          log('warn', 'agents', 'Malformed OpenRouter response, retrying', { attempt: attempt + 1, model });
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        throw new Error('OpenRouter returned malformed response (no choices[0].message)');
+      }
+      return data;
     }
 
     const status = response.status;
@@ -435,15 +577,17 @@ async function callOpenRouterWithRetry(
 }
 
 // ---------------------------------------------------------------------------
-// Progressive context truncation — every 5 rounds, compress old tool results
+// Progressive context truncation — every 8 rounds, compress old tool results.
+// Keeps last 14 messages intact (approx 7 tool exchanges).
+// Less aggressive than before: fires at round 8 instead of 5, keeps 14 instead of 8.
 // ---------------------------------------------------------------------------
 
 function truncateOldToolResults(messages: ORMessage[], keepRecentCount: number): void {
   const cutoff = messages.length - keepRecentCount;
   if (cutoff <= 2) return;
   for (let i = 2; i < cutoff; i++) {
-    if (messages[i].role === 'tool' && messages[i].content && messages[i].content!.length > 300) {
-      messages[i] = { ...messages[i], content: `[truncated — ${messages[i].content!.length} chars]` };
+    if (messages[i].role === 'tool' && messages[i].content && messages[i].content!.length > 500) {
+      messages[i] = { ...messages[i], content: messages[i].content!.slice(0, 300) + `\n[… truncated from ${messages[i].content!.length} chars]` };
     }
   }
 }
@@ -459,7 +603,7 @@ function writeTrace(agentName: string, task: string, rounds: number, status: str
     const safeName = agentName.toLowerCase().replace(/\s+/g, '-');
     writeFileSync(
       `${TRACE_DIR}/${ts}-${safeName}.json`,
-      JSON.stringify({ agent: agentName, task: task.slice(0, 200), rounds, status, output: output.slice(0, 2000), timestamp: new Date().toISOString() }, null, 2),
+      JSON.stringify({ agent: agentName, task: task.slice(0, 500), rounds, status, output: output.slice(0, 4000), timestamp: new Date().toISOString() }, null, 2),
     );
   } catch { /* best effort */ }
 }
@@ -468,8 +612,8 @@ function writeTrace(agentName: string, task: string, rounds: number, status: str
 // runAgent — agentic loop with auto-continuation
 //
 // Each segment runs up to MAX_ROUNDS_PER_SEGMENT. If the agent runs out of
-// rounds without finishing, a continuation prompt is injected summarising
-// completed actions and a new segment starts — up to MAX_SEGMENTS times.
+// rounds without finishing, a continuation prompt re-states the original task
+// and summarises completed actions. Up to MAX_SEGMENTS times.
 // Total effective rounds: 40 × 3 = 120.
 // ---------------------------------------------------------------------------
 
@@ -477,6 +621,7 @@ export interface AgentResult {
   status: 'done' | 'blocked';
   output: string;
   blocker?: string;
+  filesCreated?: string[];
 }
 
 export async function runAgent(
@@ -492,7 +637,8 @@ export async function runAgent(
   if (!agentDef) throw new Error(`Unknown agent role: ${role}`);
 
   const model = modelMap[role] ?? modelMap['__default__'] ?? 'moonshotai/kimi-k2.5';
-  const systemPrompt = [agentDef.systemPrompt, context ? `\n\nProject context: ${context}` : '', PATTERNS_HEADER].join('');
+  const workspaceTree = buildWorkspaceTree();
+  const systemPrompt = [agentDef.systemPrompt, context ? `\n\nProject context:\n${context}` : '', workspaceTree, PATTERNS_HEADER].join('');
   const tools = getToolSchemas(role, task);
   const messages: ORMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -504,17 +650,30 @@ export async function runAgent(
   const MAX_ROUNDS_PER_SEGMENT = 40;
   const MAX_SEGMENTS = 3;
 
-  let completedActions: string[] = [];
+  const completedActions: string[] = [];
+  const filesCreated: string[] = [];
   let totalRounds = 0;
 
   for (let segment = 0; segment < MAX_SEGMENTS; segment++) {
     if (segment > 0) {
       const actionSummary = completedActions.length
-        ? completedActions.slice(-30).join('\n')
+        ? completedActions.slice(-40).join('\n')
         : '(no tool actions recorded)';
+      const filesSummary = filesCreated.length
+        ? `\nFiles created/modified: ${filesCreated.join(', ')}`
+        : '';
       messages.push({
         role: 'user',
-        content: `⚙️ AUTO-CONTINUATION (segment ${segment + 1}/${MAX_SEGMENTS}): You reached the iteration limit but the task is not yet complete.\n\nTool actions completed so far:\n${actionSummary}\n\nPlease continue and complete the remaining work. Do not repeat steps already finished.`,
+        content: `⚙️ AUTO-CONTINUATION (segment ${segment + 1}/${MAX_SEGMENTS}): You reached the iteration limit but the task is not yet complete.
+
+**Original task (re-stated for continuity):**
+${task}
+
+**Tool actions completed so far:**
+${actionSummary}
+${filesSummary}
+
+Please continue and complete the remaining work. Do not repeat steps already finished. Focus on what's still missing.`,
       });
       if (onProgress) onProgress(`↩️ **${agentDef.name}** — auto-continuing (segment ${segment + 1}/${MAX_SEGMENTS})`);
       log('info', 'agent', `${agentDef.name} auto-continuation`, { segment: segment + 1, totalRounds });
@@ -525,7 +684,7 @@ export async function runAgent(
 
       if (signal?.aborted) {
         log('info', 'agent', `${agentDef.name} interrupted`, { totalRounds });
-        const result: AgentResult = { status: 'blocked', output: '(interrupted by new message)', blocker: 'Interrupted' };
+        const result: AgentResult = { status: 'blocked', output: '(interrupted by new message)', blocker: 'Interrupted', filesCreated };
         writeTrace(agentDef.name, task, totalRounds, 'interrupted', result.output);
         return result;
       }
@@ -538,14 +697,14 @@ export async function runAgent(
       if (choice.finish_reason !== 'tool_calls' || !msg.tool_calls?.length) {
         const output = msg.content ?? '(no response)';
         if (output.startsWith('BLOCKED:')) {
-          const result: AgentResult = { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim() };
+          const result: AgentResult = { status: 'blocked', output, blocker: output.slice('BLOCKED:'.length).trim(), filesCreated };
           log('warn', 'agent', `${agentDef.name} blocked`, { totalRounds, blocker: result.blocker });
           writeTrace(agentDef.name, task, totalRounds, 'blocked', output);
           return result;
         }
-        log('info', 'agent', `${agentDef.name} done`, { rounds: totalRounds, segments: segment + 1 });
+        log('info', 'agent', `${agentDef.name} done`, { rounds: totalRounds, segments: segment + 1, filesCreated: filesCreated.length });
         writeTrace(agentDef.name, task, totalRounds, 'done', output);
-        return { status: 'done', output };
+        return { status: 'done', output, filesCreated };
       }
 
       // Execute tool calls
@@ -573,14 +732,19 @@ export async function runAgent(
             ? `run_command: ${String(args['cmd']).slice(0, 80)}`
             : `${tc.function.name}(${Object.values(args).map(v => String(v).slice(0, 40)).join(', ')})`;
           completedActions.push(brief);
+          // Track files created
+          if (tc.function.name === 'write_file' && args['path']) {
+            const filePath = String(args['path']);
+            if (!filesCreated.includes(filePath)) filesCreated.push(filePath);
+          }
         } catch { /* ignore */ }
         toolResults.push({ role: 'tool', tool_call_id: tc.id, content: result });
       }
       messages.push(...toolResults);
 
-      // Progressive truncation every 5 rounds — keeps recent context, compresses older results
-      if (totalRounds > 0 && totalRounds % 5 === 0) {
-        truncateOldToolResults(messages, 8);
+      // Progressive truncation every 8 rounds — keeps last 14 messages (~7 tool exchanges)
+      if (totalRounds > 0 && totalRounds % 8 === 0) {
+        truncateOldToolResults(messages, 14);
       }
 
       if (onProgress) {
@@ -603,13 +767,14 @@ export async function runAgent(
     status: 'blocked',
     output: `Task not completed after ${totalRounds} rounds across ${MAX_SEGMENTS} segments.`,
     blocker: `Exceeded ${MAX_ROUNDS_PER_SEGMENT * MAX_SEGMENTS} total iterations`,
+    filesCreated,
   };
   writeTrace(agentDef.name, task, totalRounds, 'max-rounds', result.output);
   return result;
 }
 
 // ---------------------------------------------------------------------------
-// runExternalAgent — single-turn consultant with write access for reports
+// runExternalAgent — hired specialist with up to 15 rounds (up from 5)
 // ---------------------------------------------------------------------------
 
 export async function runExternalAgent(
@@ -631,11 +796,13 @@ export async function runExternalAgent(
 
   const model = modelMap['__default__'] ?? 'moonshotai/kimi-k2.5';
   const reportPath = `/workspace/.agency/reports/${match.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.md`;
-  const systemPrompt = (context ? `${match.systemPrompt}\n\nProject context: ${context}` : match.systemPrompt) +
+  const workspaceTree = buildWorkspaceTree();
+  const systemPrompt = (context ? `${match.systemPrompt}\n\nProject context:\n${context}` : match.systemPrompt) +
+    workspaceTree +
     `\n\nWrite your analysis, recommendations, and deliverables to: ${reportPath}\nUse write_file to persist your output so the team can reference it later.`;
 
-  // External agents get read + write tools so they can persist their analysis
-  const tools = ['read_file', 'list_files', 'write_file'].map(n => TOOL_SCHEMAS[n]).filter(Boolean);
+  // External agents get read + write + run_command so they can verify and persist
+  const tools = ['read_file', 'list_files', 'write_file', 'run_command'].map(n => TOOL_SCHEMAS[n]).filter(Boolean);
 
   const messages: ORMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -644,7 +811,9 @@ export async function runExternalAgent(
 
   log('info', 'agent', `${match.name} [hired] starting`, { model, taskPreview: task.slice(0, 80) });
 
-  for (let round = 0; round < 5; round++) {
+  const MAX_SPECIALIST_ROUNDS = 15;
+
+  for (let round = 0; round < MAX_SPECIALIST_ROUNDS; round++) {
     if (signal?.aborted) return { agentName: match.name, reply: '(interrupted)' };
 
     const data = await callOpenRouterWithRetry(model, messages, tools, apiKey, signal);
@@ -654,7 +823,7 @@ export async function runExternalAgent(
 
     if (choice.finish_reason !== 'tool_calls' || !msg.tool_calls?.length) {
       const reply = msg.content ?? '(no response)';
-      log('info', 'agent', `${match.name} [hired] done`, { replyLength: reply.length });
+      log('info', 'agent', `${match.name} [hired] done`, { rounds: round + 1, replyLength: reply.length });
       return { agentName: match.name, reply };
     }
 
@@ -673,5 +842,5 @@ export async function runExternalAgent(
     messages.push(...toolResults);
   }
 
-  return { agentName: match.name, reply: '(max rounds reached)' };
+  return { agentName: match.name, reply: `(max rounds reached after ${MAX_SPECIALIST_ROUNDS} iterations)` };
 }

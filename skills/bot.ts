@@ -34,6 +34,7 @@ import {
   runAgent,
   loadExternalAgents,
   runExternalAgent,
+  buildWorkspaceTree,
   type ExternalAgentDef,
   type ConfigMeta,
 } from './agents.js';
@@ -279,16 +280,29 @@ function loadHistory(channelId: string): ORMessage[] {
 
 /**
  * Smart history truncation — preserves the first user message (establishes
- * project context) and the most recent messages. Inserts a truncation marker.
+ * project context), injects a PRD summary so requirements are never lost,
+ * and keeps the most recent messages.
  */
 function truncateHistory(history: ORMessage[], maxMessages = 40): ORMessage[] {
   if (history.length <= maxMessages) return history;
   const first = history[0];
-  const tail = history.slice(-(maxMessages - 2));
+  const tail = history.slice(-(maxMessages - 3));
   const dropped = history.length - maxMessages;
+
+  // Inject PRD summary as a pinned context slot so it's never lost
+  let prdContext = '';
+  try {
+    const prd = readFileSync('/workspace/.agency/artifacts/prd.md', 'utf-8');
+    if (prd.length > 0) {
+      prdContext = prd.length > 3000
+        ? prd.slice(0, 3000) + '\n[… PRD truncated — full version at /workspace/.agency/artifacts/prd.md]'
+        : prd;
+    }
+  } catch { /* no PRD */ }
+
   return [
     first,
-    { role: 'system', content: `[${dropped} earlier messages truncated to save context]` },
+    { role: 'system', content: `[${dropped} earlier messages truncated]${prdContext ? `\n\n**Current PRD (pinned):**\n${prdContext}` : ''}` },
     ...tail,
   ];
 }
@@ -319,17 +333,42 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 function buildAgentContext(): string {
-  const base = `Project: ${PROJECT_NAME}`;
+  const sections: string[] = [`Project: ${PROJECT_NAME}`];
   try {
     const state = loadState();
+
+    // Recent completed work — richer context (last 5 tasks, up from 3)
     const recentDone = state.tasks
       .filter(t => t.status === 'done' && t.result)
-      .slice(-3)
+      .slice(-5)
       .map(t => `[${t.assignee}] ${t.title}: ${t.result}`)
       .join('\n');
-    if (recentDone) return `${base}\n\nRecent completed work:\n${recentDone}`;
+    if (recentDone) sections.push(`Recent completed work:\n${recentDone}`);
+
+    // In-progress work — so agents know what's being built concurrently
+    const inProgress = state.tasks
+      .filter(t => t.status === 'in-progress')
+      .map(t => `[${t.assignee}] ${t.title}`)
+      .join('\n');
+    if (inProgress) sections.push(`Currently in progress (other agents working on):\n${inProgress}`);
+
+    // Tech stack and key decisions from memory — prevents conflicting choices
+    const mem = state.memory;
+    if (mem) {
+      if (mem.techStack.length) sections.push(`Tech stack: ${mem.techStack.join(', ')}`);
+      if (mem.keyDecisions.length) sections.push(`Key decisions: ${mem.keyDecisions.join('; ')}`);
+    }
+
+    // PRD summary if it exists — agents should know the requirements
+    try {
+      const prd = readFileSync('/workspace/.agency/artifacts/prd.md', 'utf-8');
+      if (prd.length > 0) {
+        const prdSnippet = prd.length > 2000 ? prd.slice(0, 2000) + '\n[… PRD truncated — read full PRD at /workspace/.agency/artifacts/prd.md]' : prd;
+        sections.push(`PRD (requirements):\n${prdSnippet}`);
+      }
+    } catch { /* no PRD yet */ }
   } catch { /* best effort */ }
-  return base;
+  return sections.join('\n\n');
 }
 
 const GITHUB_URL_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/;
@@ -340,31 +379,12 @@ function validateRepoUrl(url: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace filesystem snapshot — gives Andy ground truth about disk contents
-// regardless of which tasks completed/failed/timed-out.
+// Workspace filesystem snapshot — reuses buildWorkspaceTree from agents.ts
 // ---------------------------------------------------------------------------
 
 function buildWorkspaceSnapshot(): string {
-  try {
-    const topLevel = readdirSync(WORKSPACE).filter(f => !f.startsWith('.'));
-    const lines: string[] = ['**Workspace — actual files on disk (/workspace):**'];
-    for (const entry of topLevel.slice(0, 20)) {
-      const full = `${WORKSPACE}/${entry}`;
-      try {
-        const st = statSync(full);
-        if (st.isDirectory()) {
-          const children = readdirSync(full).filter(f => !f.startsWith('.')).slice(0, 8);
-          lines.push(`  📁 ${entry}/  [${children.join(', ')}${children.length === 8 ? ', …' : ''}]`);
-        } else {
-          lines.push(`  📄 ${entry}`);
-        }
-      } catch { lines.push(`  ${entry}`); }
-    }
-    if (topLevel.length > 20) lines.push(`  … and ${topLevel.length - 20} more`);
-    return lines.join('\n');
-  } catch {
-    return '';
-  }
+  const tree = buildWorkspaceTree();
+  return tree ? tree.replace(/^\n+/, '') : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -409,16 +429,27 @@ You can hire any of ${externalAgents.length} additional specialists — UX desig
 9. STOP. Do not call \`consult_agent\` yet. Wait for explicit approval.
 
 **PHASE 3 — BUILD (only after explicit client approval):**
-10. Once the client approves, call \`send_update\` with a kick-off message, then dispatch agents using \`consult_agent\`. Agents run **in the background** — you do NOT wait for them. The client can keep chatting with you while they work.
-11. Use \`get_running_tasks\` when asked for a status update.
-12. Use \`wait_for_tasks\` when the next step depends on a currently running agent's output.
+10. Once the client approves, call \`send_update\` with a kick-off message, then dispatch agents using \`consult_agent\`. Agents run **in the background** — you do NOT wait for them.
+11. **CRITICAL: scope tasks tightly.** Each \`consult_agent\` call should focus on ONE clear deliverable (e.g. "build the Token.sol contract with ERC-20, mint, burn" — NOT "build the entire smart contract layer"). Agents perform better with focused tasks. If you need 5 things built, make 5 separate calls with specific instructions each.
+12. **Include context in every task:** Always tell agents what other agents are building concurrently. Example: "The backend-dev is building a Node.js API at /workspace/backend. Your frontend should call those endpoints."
+13. Use \`get_running_tasks\` when asked for a status update.
+14. Use \`wait_for_tasks\` when the next step depends on a currently running agent's output.
 
-**PHASE 4 — DELIVER:**
-13. Use \`send_artifact\` to deliver documents and files. Agents generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents open PRs via: run_command("gh pr create ...").
-14. After delivery, use \`update_memory\` to record the milestone.
+**PHASE 4 — VERIFY & DELIVER:**
+15. After agents complete, call \`get_state\` to see the **live filesystem snapshot** and QA verdicts. Check that actual files exist on disk.
+16. If QA reported PARTIAL or FAILED: re-dispatch the agent with a focused fix task (e.g. "Fix the compilation error in /workspace/contracts/Token.sol — forge build fails with: [error]").
+17. Use \`send_artifact\` to deliver documents. Agents can generate PDFs via: run_command("pandoc doc.md -o doc.pdf"). Agents open PRs via: run_command("gh pr create ...").
+18. After delivery, use \`update_memory\` to record the milestone.
+
+**ERROR RECOVERY — when agents fail or time out:**
+- If an agent times out: the task was too large. **Break it into 2-3 smaller tasks** and re-dispatch.
+- If an agent is blocked: read the blocker reason, fix the underlying issue (install deps, create missing files), then re-dispatch.
+- If QA says FAILED: re-dispatch the same agent with the specific fix needed (include the QA error message).
+- If 3+ agents fail on the same project: call \`get_state\` to assess what actually exists, then message the client with a status update and revised plan.
+- **Never give up silently.** Always communicate progress and recovery steps to the client.
 
 **Always:**
-- Use \`get_state\` at the start of a session to recall what has already been done. \`get_state\` also shows a **live filesystem snapshot** of /workspace — always call it when the client asks "what was delivered?", "what files exist?", or "what's the status?". Never claim something is missing without first checking \`get_state\`.
+- Use \`get_state\` at the start of a session to recall what has been done. \`get_state\` shows a **live filesystem snapshot** of /workspace — always call it when the client asks "what was delivered?", "what files exist?", or "what's the status?". **Never claim something is missing without checking \`get_state\` first.**
 - Use \`list_artifacts\` to show the client what project documents exist.
 - Use \`read_artifact\` to read the latest version before re-dispatching agents (client may have edited the file).
 - Use \`add_repo\` when the client provides a GitHub URL.
@@ -818,7 +849,7 @@ function dispatchAgentBackground(
   const agentDef = AGENTS.find(a => a.role === role);
   const agentName = agentDef?.name ?? role;
   const taskId = `bg-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
-  const taskPreview = task.length > 120 ? task.slice(0, 120) + '…' : task;
+  const taskPreview = task.length > 200 ? task.slice(0, 200) + '…' : task;
 
   // Auto-track in project state
   const taskRecord = addTask(taskPreview, role);
@@ -837,24 +868,35 @@ function dispatchAgentBackground(
       );
       const result = await withTimeout(agentPromise, AGENT_TIMEOUT_MS, `Agent ${agentName}`);
 
+      // Store richer task record — full output (up to 2000 chars) + files created
+      const filesNote = result.filesCreated?.length
+        ? `\nFiles: ${result.filesCreated.join(', ')}`
+        : '';
       updateTask(taskRecord.id, {
         status: result.status === 'blocked' ? 'blocked' : 'done',
-        result: result.output.slice(0, 500),
+        result: result.output.slice(0, 2000) + filesNote,
       });
 
       if (result.status === 'blocked') {
         await channelSend(channelId, `⚠️ **${agentName}** is blocked: ${result.blocker}`);
+        // Error recovery: notify PM with actionable context
+        await channelSend(channelId, `💡 **Recovery options:** Re-dispatch ${agentName} with a smaller scope, try a different agent, or ask the client for guidance.`);
       } else {
-        await channelSend(channelId, `✅ **${agentName}** — done\n${result.output.slice(0, 800)}`);
+        await channelSend(channelId, `✅ **${agentName}** — done\n${result.output.slice(0, 800)}${filesNote}`);
 
         // Auto-dispatch QA verifier for tasks that produce file deliverables
-        if (role !== 'qa-verifier' && role !== 'risk-manager' && role !== 'tech-lead') {
-          dispatchQAVerifier(task, result.output, channelId);
+        if (role !== 'qa-verifier' && role !== 'risk-manager') {
+          dispatchQAVerifier(task, result.output, channelId, taskRecord.id);
         }
       }
     } catch (err) {
-      updateTask(taskRecord.id, { status: 'blocked', result: (err as Error).message });
-      await channelSend(channelId, `❌ **${agentName}** failed: ${(err as Error).message}`);
+      const errMsg = (err as Error).message;
+      updateTask(taskRecord.id, { status: 'blocked', result: errMsg });
+      await channelSend(channelId, `❌ **${agentName}** failed: ${errMsg}`);
+      // Error recovery suggestion
+      if (errMsg.includes('timed out')) {
+        await channelSend(channelId, `💡 **${agentName}** timed out — the task may be too large. Consider breaking it into smaller pieces and re-dispatching.`);
+      }
     } finally {
       bgRemove(channelId, taskId);
     }
@@ -863,26 +905,40 @@ function dispatchAgentBackground(
   bgAdd(channelId, { id: taskId, agentName, taskPreview, startedAt: new Date(), promise });
 }
 
-function dispatchQAVerifier(originalTask: string, agentOutput: string, channelId: string): void {
-  const qaTask = `Verify the deliverables from this task:\n\nORIGINAL TASK:\n${originalTask.slice(0, 500)}\n\nAGENT OUTPUT:\n${agentOutput.slice(0, 1000)}`;
+function dispatchQAVerifier(originalTask: string, agentOutput: string, channelId: string, parentTaskId: string): void {
+  const qaTask = `Verify the deliverables from this task:\n\nORIGINAL TASK:\n${originalTask.slice(0, 1500)}\n\nAGENT OUTPUT:\n${agentOutput.slice(0, 2000)}\n\nYou MUST:\n1. Check all claimed file paths exist with real content\n2. Run the appropriate build/compile command\n3. Run tests if they exist\n4. Check if the key requirements from the original task were addressed`;
   const qaId = `qa-${Date.now()}`;
 
   const promise = (async () => {
     try {
       const result = await withTimeout(
         runAgent('qa-verifier', qaTask, buildAgentContext(), getModelMap(), OPENROUTER_API_KEY),
-        2 * 60 * 1000,
+        5 * 60 * 1000, // 5 minutes for QA (up from 2 — needs time to compile/test)
         'QA Verifier',
       );
       const verdict = result.output.split('\n').find(l =>
         l.startsWith('VERIFIED:') || l.startsWith('PARTIAL:') || l.startsWith('FAILED:') || l.startsWith('SKIPPED:'),
-      ) ?? result.output.slice(-200);
+      ) ?? result.output.slice(-300);
+
+      // Store QA verdict in the parent task record for PM retrieval
+      try {
+        const state = loadState();
+        const parentTask = state.tasks.find(t => t.id === parentTaskId);
+        if (parentTask?.result) {
+          updateTask(parentTaskId, { result: parentTask.result + `\n[QA: ${verdict.slice(0, 300)}]` });
+        }
+      } catch { /* best effort */ }
 
       if (verdict.startsWith('FAILED:') || verdict.startsWith('PARTIAL:')) {
         await channelSend(channelId, `🔍 **QA Verifier** — ${verdict}`);
       }
-      // VERIFIED and SKIPPED are silent — no noise for passing tasks
-    } catch { /* QA is best-effort, never fail the workflow */ } finally {
+      // Also post VERIFIED to give positive confirmation
+      if (verdict.startsWith('VERIFIED:')) {
+        await channelSend(channelId, `✅ **QA Verified** — ${verdict.slice(0, 200)}`);
+      }
+    } catch (err) {
+      log('warn', 'bot', 'QA Verifier error', { error: (err as Error).message });
+    } finally {
       bgRemove(channelId, qaId);
     }
   })();
